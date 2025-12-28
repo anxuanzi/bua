@@ -8,6 +8,7 @@ import (
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
+	"github.com/google/uuid"
 
 	"github.com/anxuanzi/bua-go/dom"
 	"github.com/anxuanzi/bua-go/screenshot"
@@ -25,12 +26,26 @@ type Config struct {
 	ScreenshotConfig *screenshot.Config
 }
 
+// TabInfo contains information about a browser tab.
+type TabInfo struct {
+	ID    string
+	URL   string
+	Title string
+}
+
 // Browser wraps a rod browser for controlled automation.
+// Supports multi-tab management.
 type Browser struct {
 	rod      *rod.Browser
-	page     *rod.Page
 	config   Config
 	screener *screenshot.Manager
+
+	// Multi-tab support
+	pages       map[string]*rod.Page // tabID -> page
+	activeTabID string               // currently active tab
+
+	// Deprecated: use pages map instead
+	page *rod.Page
 
 	mu sync.RWMutex
 }
@@ -40,6 +55,7 @@ func New(rodBrowser *rod.Browser, cfg Config) *Browser {
 	b := &Browser{
 		rod:    rodBrowser,
 		config: cfg,
+		pages:  make(map[string]*rod.Page),
 	}
 
 	if cfg.ScreenshotConfig != nil {
@@ -50,56 +66,83 @@ func New(rodBrowser *rod.Browser, cfg Config) *Browser {
 }
 
 // Navigate navigates to the specified URL.
+// If no tab exists, creates a new one.
 func (b *Browser) Navigate(ctx context.Context, url string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	// Create page if needed
-	if b.page == nil {
-		// Create a blank page first
-		page, err := b.rod.Page(proto.TargetCreateTarget{URL: "about:blank"})
+	// Get current page (create if needed)
+	page := b.getActivePageLocked()
+	if page == nil {
+		// Create first tab
+		tabID, err := b.createTabLocked(url)
 		if err != nil {
-			return fmt.Errorf("failed to create page: %w", err)
+			return err
 		}
-		b.page = page
-
-		// Set viewport to match window size for proper responsive behavior
-		// Key: Window size (set in launcher) and viewport must match
-		if b.config.Viewport != nil {
-			err := b.page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-				Width:             b.config.Viewport.Width,
-				Height:            b.config.Viewport.Height,
-				DeviceScaleFactor: 1.0,
-				Mobile:            false,
-			})
-			if err != nil {
-				return fmt.Errorf("failed to set viewport: %w", err)
-			}
-		}
-
-		// Navigate to the URL
-		err = b.page.Navigate(url)
-		if err != nil {
-			return fmt.Errorf("failed to navigate: %w", err)
-		}
+		page = b.pages[tabID]
 	} else {
 		// Navigate existing page
-		err := b.page.Navigate(url)
+		err := page.Navigate(url)
 		if err != nil {
 			return fmt.Errorf("failed to navigate: %w", err)
 		}
 	}
 
 	// Wait for page to be ready
-	err := b.page.WaitLoad()
+	err := page.WaitLoad()
 	if err != nil {
 		return fmt.Errorf("failed to wait for page load: %w", err)
 	}
 
 	// Wait for page to stabilize (animations, lazy loading, etc.)
-	b.page.MustWaitStable()
+	page.MustWaitStable()
 
 	return nil
+}
+
+// createTabLocked creates a new tab (must hold lock).
+func (b *Browser) createTabLocked(url string) (string, error) {
+	// Create a new page
+	page, err := b.rod.Page(proto.TargetCreateTarget{URL: url})
+	if err != nil {
+		return "", fmt.Errorf("failed to create page: %w", err)
+	}
+
+	// Set viewport
+	if b.config.Viewport != nil {
+		err := page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
+			Width:             b.config.Viewport.Width,
+			Height:            b.config.Viewport.Height,
+			DeviceScaleFactor: 1.0,
+			Mobile:            false,
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to set viewport: %w", err)
+		}
+	}
+
+	// Generate tab ID
+	tabID := uuid.New().String()[:8]
+
+	// Store tab
+	b.pages[tabID] = page
+	b.activeTabID = tabID
+
+	// Also maintain backward compatibility
+	b.page = page
+
+	return tabID, nil
+}
+
+// getActivePageLocked returns the active page (must hold lock).
+func (b *Browser) getActivePageLocked() *rod.Page {
+	if b.activeTabID != "" {
+		if page, ok := b.pages[b.activeTabID]; ok {
+			return page
+		}
+	}
+	// Fallback to legacy single page
+	return b.page
 }
 
 // Screenshot takes a screenshot of the current page.
@@ -107,11 +150,12 @@ func (b *Browser) Screenshot(ctx context.Context) ([]byte, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return nil, fmt.Errorf("no active page")
 	}
 
-	data, err := b.page.Screenshot(true, nil)
+	data, err := page.Screenshot(true, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to take screenshot: %w", err)
 	}
@@ -124,12 +168,13 @@ func (b *Browser) ScreenshotWithAnnotations(ctx context.Context, elements *dom.E
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return nil, fmt.Errorf("no active page")
 	}
 
 	// Take raw screenshot
-	data, err := b.page.Screenshot(true, nil)
+	data, err := page.Screenshot(true, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to take screenshot: %w", err)
 	}
@@ -160,11 +205,12 @@ func (b *Browser) GetElementMap(ctx context.Context) (*dom.ElementMap, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return nil, fmt.Errorf("no active page")
 	}
 
-	return dom.ExtractElementMap(ctx, b.page)
+	return dom.ExtractElementMap(ctx, page)
 }
 
 // GetAccessibilityTree extracts the accessibility tree from the current page.
@@ -172,11 +218,12 @@ func (b *Browser) GetAccessibilityTree(ctx context.Context) (*dom.AccessibilityT
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return nil, fmt.Errorf("no active page")
 	}
 
-	return dom.ExtractAccessibilityTree(ctx, b.page)
+	return dom.ExtractAccessibilityTree(ctx, page)
 }
 
 // Click clicks on an element by its index in the element map.
@@ -184,12 +231,13 @@ func (b *Browser) Click(ctx context.Context, elementIndex int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
 	// Get the element map to find the element
-	elements, err := dom.ExtractElementMap(ctx, b.page)
+	elements, err := dom.ExtractElementMap(ctx, page)
 	if err != nil {
 		return fmt.Errorf("failed to get element map: %w", err)
 	}
@@ -210,7 +258,7 @@ func (b *Browser) Click(ctx context.Context, elementIndex int) error {
 		Y:          centerY,
 		Button:     proto.InputMouseButtonLeft,
 		ClickCount: 0,
-	}.Call(b.page)
+	}.Call(page)
 	if err != nil {
 		return fmt.Errorf("failed to move mouse: %w", err)
 	}
@@ -221,7 +269,7 @@ func (b *Browser) Click(ctx context.Context, elementIndex int) error {
 		Y:          centerY,
 		Button:     proto.InputMouseButtonLeft,
 		ClickCount: 1,
-	}.Call(b.page)
+	}.Call(page)
 	if err != nil {
 		return fmt.Errorf("failed to press mouse: %w", err)
 	}
@@ -232,7 +280,7 @@ func (b *Browser) Click(ctx context.Context, elementIndex int) error {
 		Y:          centerY,
 		Button:     proto.InputMouseButtonLeft,
 		ClickCount: 1,
-	}.Call(b.page)
+	}.Call(page)
 	if err != nil {
 		return fmt.Errorf("failed to release mouse: %w", err)
 	}
@@ -245,7 +293,8 @@ func (b *Browser) ClickElement(ctx context.Context, el *dom.Element) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
@@ -259,7 +308,7 @@ func (b *Browser) ClickElement(ctx context.Context, el *dom.Element) error {
 		Y:          centerY,
 		Button:     proto.InputMouseButtonLeft,
 		ClickCount: 0,
-	}.Call(b.page)
+	}.Call(page)
 	if err != nil {
 		return fmt.Errorf("failed to move mouse: %w", err)
 	}
@@ -270,7 +319,7 @@ func (b *Browser) ClickElement(ctx context.Context, el *dom.Element) error {
 		Y:          centerY,
 		Button:     proto.InputMouseButtonLeft,
 		ClickCount: 1,
-	}.Call(b.page)
+	}.Call(page)
 	if err != nil {
 		return fmt.Errorf("failed to press mouse: %w", err)
 	}
@@ -281,7 +330,7 @@ func (b *Browser) ClickElement(ctx context.Context, el *dom.Element) error {
 		Y:          centerY,
 		Button:     proto.InputMouseButtonLeft,
 		ClickCount: 1,
-	}.Call(b.page)
+	}.Call(page)
 	if err != nil {
 		return fmt.Errorf("failed to release mouse: %w", err)
 	}
@@ -294,12 +343,13 @@ func (b *Browser) Type(ctx context.Context, text string) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
 	// Use InsertText for text input
-	return b.page.InsertText(text)
+	return page.InsertText(text)
 }
 
 // TypeInElement clicks on an element and types text into it.
@@ -310,7 +360,12 @@ func (b *Browser) TypeInElement(ctx context.Context, elementIndex int, text stri
 	}
 
 	// Small delay to ensure focus
-	b.page.MustWaitStable()
+	b.mu.RLock()
+	page := b.getActivePageLocked()
+	b.mu.RUnlock()
+	if page != nil {
+		page.MustWaitStable()
+	}
 
 	// Type the text
 	return b.Type(ctx, text)
@@ -321,11 +376,12 @@ func (b *Browser) Scroll(ctx context.Context, deltaX, deltaY float64) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
-	return b.page.Mouse.Scroll(deltaX, deltaY, 1)
+	return page.Mouse.Scroll(deltaX, deltaY, 1)
 }
 
 // ScrollToElement scrolls an element into view.
@@ -333,11 +389,12 @@ func (b *Browser) ScrollToElement(ctx context.Context, elementIndex int) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
-	elements, err := dom.ExtractElementMap(ctx, b.page)
+	elements, err := dom.ExtractElementMap(ctx, page)
 	if err != nil {
 		return fmt.Errorf("failed to get element map: %w", err)
 	}
@@ -348,13 +405,13 @@ func (b *Browser) ScrollToElement(ctx context.Context, elementIndex int) error {
 	}
 
 	// Scroll the element into view using JavaScript
-	_, err = b.page.Eval(fmt.Sprintf(
+	_, err = page.Eval(fmt.Sprintf(
 		`document.querySelector('[data-bua-index="%d"]')?.scrollIntoView({behavior: 'smooth', block: 'center'})`,
 		el.Index,
 	))
 	if err != nil {
 		// Fall back to coordinate-based scroll
-		return b.page.Mouse.Scroll(0, el.BoundingBox.Y-300, 1)
+		return page.Mouse.Scroll(0, el.BoundingBox.Y-300, 1)
 	}
 
 	return nil
@@ -365,11 +422,12 @@ func (b *Browser) WaitForNavigation(ctx context.Context) error {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
-	return b.page.WaitLoad()
+	return page.WaitLoad()
 }
 
 // WaitForStable waits for the page to become stable (no more changes).
@@ -377,11 +435,12 @@ func (b *Browser) WaitForStable(ctx context.Context) error {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
-	return b.page.WaitStable(300)
+	return page.WaitStable(300)
 }
 
 // GetURL returns the current page URL.
@@ -389,11 +448,12 @@ func (b *Browser) GetURL() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return ""
 	}
 
-	info, err := b.page.Info()
+	info, err := page.Info()
 	if err != nil {
 		return ""
 	}
@@ -405,11 +465,12 @@ func (b *Browser) GetTitle() string {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return ""
 	}
 
-	info, err := b.page.Info()
+	info, err := page.Info()
 	if err != nil {
 		return ""
 	}
@@ -417,10 +478,18 @@ func (b *Browser) GetTitle() string {
 }
 
 // Page returns the underlying rod.Page for advanced operations.
+// Deprecated: Use GetActiveTabID() and multi-tab methods instead.
 func (b *Browser) Page() *rod.Page {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
-	return b.page
+	return b.getActivePageLocked()
+}
+
+// GetActiveTabID returns the ID of the currently active tab.
+func (b *Browser) GetActiveTabID() string {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.activeTabID
 }
 
 // intPtr returns a pointer to an int value.
@@ -428,11 +497,21 @@ func intPtr(v int) *int {
 	return &v
 }
 
-// Close closes the browser.
+// Close closes the browser and all tabs.
 func (b *Browser) Close() error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
+	// Close all tabs
+	for tabID, page := range b.pages {
+		if page != nil {
+			page.Close()
+		}
+		delete(b.pages, tabID)
+	}
+	b.activeTabID = ""
+
+	// Legacy cleanup
 	if b.page != nil {
 		b.page.Close()
 		b.page = nil
@@ -445,4 +524,101 @@ func (b *Browser) Close() error {
 	}
 
 	return nil
+}
+
+// ========================================
+// Multi-Tab Management Methods
+// ========================================
+
+// NewTab opens a new browser tab with the specified URL.
+// Returns the tab ID for later reference.
+func (b *Browser) NewTab(ctx context.Context, url string) (string, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	tabID, err := b.createTabLocked(url)
+	if err != nil {
+		return "", err
+	}
+
+	// Wait for page to load
+	page := b.pages[tabID]
+	if err := page.WaitLoad(); err != nil {
+		return tabID, fmt.Errorf("page load failed: %w", err)
+	}
+	page.MustWaitStable()
+
+	return tabID, nil
+}
+
+// SwitchTab switches to a different browser tab by its ID.
+func (b *Browser) SwitchTab(ctx context.Context, tabID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	page, ok := b.pages[tabID]
+	if !ok {
+		return fmt.Errorf("tab %s not found", tabID)
+	}
+
+	b.activeTabID = tabID
+	b.page = page // maintain backward compatibility
+
+	// Bring the tab to front
+	page.MustActivate()
+
+	return nil
+}
+
+// CloseTab closes a browser tab by its ID.
+// Cannot close the last remaining tab.
+func (b *Browser) CloseTab(ctx context.Context, tabID string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	page, ok := b.pages[tabID]
+	if !ok {
+		return fmt.Errorf("tab %s not found", tabID)
+	}
+
+	// Don't allow closing the last tab
+	if len(b.pages) <= 1 {
+		return fmt.Errorf("cannot close the last tab")
+	}
+
+	// Close the page
+	page.Close()
+	delete(b.pages, tabID)
+
+	// If we closed the active tab, switch to another
+	if b.activeTabID == tabID {
+		for newTabID, newPage := range b.pages {
+			b.activeTabID = newTabID
+			b.page = newPage
+			newPage.MustActivate()
+			break
+		}
+	}
+
+	return nil
+}
+
+// ListTabs returns information about all open tabs.
+func (b *Browser) ListTabs(ctx context.Context) []TabInfo {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	var tabs []TabInfo
+	for tabID, page := range b.pages {
+		info, err := page.Info()
+		if err != nil {
+			continue
+		}
+		tabs = append(tabs, TabInfo{
+			ID:    tabID,
+			URL:   info.URL,
+			Title: info.Title,
+		})
+	}
+	return tabs
 }

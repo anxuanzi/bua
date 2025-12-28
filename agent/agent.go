@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/agent"
@@ -17,7 +19,6 @@ import (
 
 	"github.com/anxuanzi/bua-go/browser"
 	"github.com/anxuanzi/bua-go/dom"
-	"github.com/anxuanzi/bua-go/memory"
 )
 
 // Config holds agent configuration.
@@ -48,13 +49,17 @@ type Config struct {
 type BrowserAgent struct {
 	config   Config
 	browser  *browser.Browser
-	memory   *memory.Manager
 	adkAgent agent.Agent
 	logger   *Logger
+	tools    []tool.Tool
+
+	// In-memory state for findings (since tool.Context doesn't provide state access)
+	findings   []map[string]any
+	findingsMu sync.RWMutex
 }
 
 // New creates a new browser agent.
-func New(cfg Config, b *browser.Browser, m *memory.Manager) *BrowserAgent {
+func New(cfg Config, b *browser.Browser) *BrowserAgent {
 	if cfg.MaxIterations == 0 {
 		cfg.MaxIterations = 50
 	}
@@ -66,10 +71,10 @@ func New(cfg Config, b *browser.Browser, m *memory.Manager) *BrowserAgent {
 	}
 
 	return &BrowserAgent{
-		config:  cfg,
-		browser: b,
-		memory:  m,
-		logger:  NewLogger(cfg.Debug),
+		config:   cfg,
+		browser:  b,
+		logger:   NewLogger(cfg.Debug),
+		findings: []map[string]any{},
 	}
 }
 
@@ -94,6 +99,7 @@ func (a *BrowserAgent) Init(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to create browser tools: %w", err)
 	}
+	a.tools = tools
 
 	// Create ADK agent
 	adkAgent, err := llmagent.New(llmagent.Config{
@@ -115,11 +121,10 @@ func (a *BrowserAgent) Init(ctx context.Context) error {
 	return nil
 }
 
-// preAction shows annotations and captures a screenshot before an action.
-// Returns the screenshot path if captured, or empty string.
-func (a *BrowserAgent) preAction(actionName string) string {
+// preAction is called before browser actions to show annotations and capture state.
+func (a *BrowserAgent) preAction() {
 	if a.browser == nil || !a.config.ShowAnnotations {
-		return ""
+		return
 	}
 
 	bgCtx := context.Background()
@@ -128,7 +133,7 @@ func (a *BrowserAgent) preAction(actionName string) string {
 	elements, err := a.browser.GetElementMap(bgCtx)
 	if err != nil {
 		a.logger.Error("preAction/GetElementMap", err)
-		return ""
+		return
 	}
 
 	// Show annotations in browser
@@ -144,44 +149,45 @@ func (a *BrowserAgent) preAction(actionName string) string {
 		screenshot, err := a.browser.ScreenshotWithAnnotations(bgCtx, elements)
 		if err != nil {
 			a.logger.Error("preAction/Screenshot", err)
-			return ""
+			return
 		}
 
-		// Save screenshot
-		filename := fmt.Sprintf("step_%03d_%s_%s.png",
+		filename := fmt.Sprintf("step_%03d_%s.png",
 			a.logger.GetStep()+1,
-			actionName,
 			time.Now().Format("150405"))
-		path := filepath.Join(a.config.ScreenshotDir, filename)
-
-		// Ensure directory exists
-		if err := os.MkdirAll(a.config.ScreenshotDir, 0755); err != nil {
-			a.logger.Error("preAction/MkdirAll", err)
-			return ""
-		}
-
-		if err := os.WriteFile(path, screenshot, 0644); err != nil {
-			a.logger.Error("preAction/WriteFile", err)
-			return ""
-		}
-
-		a.logger.Screenshot(path, true)
-		return path
+		a.saveScreenshotToFile(screenshot, filename)
 	}
-
-	return ""
 }
 
-// postAction cleans up annotations after an action.
+// postAction is called after browser actions to clean up annotations.
 func (a *BrowserAgent) postAction() {
 	if a.browser == nil || !a.config.ShowAnnotations {
 		return
 	}
 
 	bgCtx := context.Background()
+
+	// Hide annotations after action
 	if err := a.browser.HideAnnotations(bgCtx); err != nil {
 		a.logger.Error("postAction/HideAnnotations", err)
 	}
+
+	// Wait for page to stabilize
+	a.browser.WaitForStable(bgCtx)
+}
+
+// saveScreenshotToFile saves screenshot to disk as fallback.
+func (a *BrowserAgent) saveScreenshotToFile(data []byte, filename string) {
+	path := filepath.Join(a.config.ScreenshotDir, filename)
+	if err := os.MkdirAll(a.config.ScreenshotDir, 0755); err != nil {
+		a.logger.Error("saveScreenshotToFile/MkdirAll", err)
+		return
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		a.logger.Error("saveScreenshotToFile/WriteFile", err)
+		return
+	}
+	a.logger.Screenshot(path, true)
 }
 
 // createBrowserTools creates the function tools for browser automation.
@@ -194,16 +200,16 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 			return ClickOutput{Success: false, Message: "Browser not initialized"}, nil
 		}
 
-		a.logger.Click(input.ElementIndex, input.Reasoning)
-		a.preAction("click")
+		a.preAction()
 		defer a.postAction()
+
+		a.logger.Click(input.ElementIndex, input.Reasoning)
 
 		err := a.browser.Click(context.Background(), input.ElementIndex)
 		if err != nil {
 			a.logger.ActionResult(false, err.Error())
 			return ClickOutput{Success: false, Message: err.Error()}, nil
 		}
-		a.browser.WaitForStable(context.Background())
 
 		msg := fmt.Sprintf("Clicked element %d", input.ElementIndex)
 		a.logger.ActionResult(true, msg)
@@ -227,9 +233,10 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 			return TypeOutput{Success: false, Message: "Browser not initialized"}, nil
 		}
 
-		a.logger.Type(input.ElementIndex, input.Text, input.Reasoning)
-		a.preAction("type")
+		a.preAction()
 		defer a.postAction()
+
+		a.logger.Type(input.ElementIndex, input.Text, input.Reasoning)
 
 		err := a.browser.TypeInElement(context.Background(), input.ElementIndex, input.Text)
 		if err != nil {
@@ -259,14 +266,15 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 			return ScrollOutput{Success: false, Message: "Browser not initialized"}, nil
 		}
 
+		a.preAction()
+		defer a.postAction()
+
 		amount := input.Amount
 		if amount == 0 {
 			amount = 500
 		}
 
 		a.logger.Scroll(input.Direction, amount, input.Reasoning)
-		a.preAction("scroll")
-		defer a.postAction()
 
 		var deltaY float64
 		switch input.Direction {
@@ -306,6 +314,9 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 		if a.browser == nil {
 			return NavigateOutput{Success: false, Message: "Browser not initialized"}, nil
 		}
+
+		a.preAction()
+		defer a.postAction()
 
 		a.logger.Navigate(input.URL)
 
@@ -449,15 +460,6 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 		output.ElementMap = elements.ToTokenString()
 		a.logger.PageState(output.URL, output.Title, elements.Count())
 
-		if a.memory != nil {
-			a.memory.AddObservation(&memory.Observation{
-				Timestamp:    time.Now(),
-				URL:          output.URL,
-				Title:        output.Title,
-				ElementCount: elements.Count(),
-			})
-		}
-
 		return output, nil
 	}
 	pageStateTool, err := functiontool.New(
@@ -471,6 +473,243 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 		return nil, fmt.Errorf("failed to create page state tool: %w", err)
 	}
 	tools = append(tools, pageStateTool)
+
+	// Save finding tool - for persisting important discoveries
+	saveFindingHandler := func(ctx tool.Context, input SaveFindingInput) (SaveFindingOutput, error) {
+		a.logger.Info("save_finding: Saving: %s - %s", input.Category, input.Title)
+
+		// Create a structured finding to save
+		finding := map[string]any{
+			"category":   input.Category,
+			"title":      input.Title,
+			"details":    input.Details,
+			"source_url": a.browser.GetURL(),
+			"timestamp":  time.Now().Format(time.RFC3339),
+		}
+
+		// Save to agent's internal findings store
+		a.findingsMu.Lock()
+		a.findings = append(a.findings, finding)
+		totalSaved := len(a.findings)
+		a.findingsMu.Unlock()
+
+		// Generate finding ID
+		findingID := fmt.Sprintf("finding_%s_%s_%d",
+			input.Category,
+			sanitizeFilename(input.Title),
+			time.Now().Unix())
+
+		return SaveFindingOutput{
+			Success:    true,
+			Message:    fmt.Sprintf("Saved finding: %s", input.Title),
+			FindingID:  findingID,
+			TotalSaved: totalSaved,
+		}, nil
+	}
+	saveFindingTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "save_finding",
+			Description: "Save an important finding or discovery to memory. Use this to remember leads, contacts, important data, or any information you need to recall later. Findings persist across the entire session.",
+		},
+		saveFindingHandler,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create save_finding tool: %w", err)
+	}
+	tools = append(tools, saveFindingTool)
+
+	// Search findings tool - for retrieving saved findings
+	searchFindingsHandler := func(ctx tool.Context, input SearchFindingsInput) (SearchFindingsOutput, error) {
+		a.logger.Info("search_findings: Searching: %s (category: %s)", input.Query, input.Category)
+
+		a.findingsMu.RLock()
+		allFindings := make([]map[string]any, len(a.findings))
+		copy(allFindings, a.findings)
+		a.findingsMu.RUnlock()
+
+		var results []map[string]any
+
+		// Filter by category if provided
+		if input.Category != "" {
+			for _, finding := range allFindings {
+				cat, _ := finding["category"].(string)
+				if cat == input.Category {
+					results = append(results, finding)
+				}
+			}
+		} else {
+			results = allFindings
+		}
+
+		// Filter by query if provided
+		if input.Query != "" && len(results) > 0 {
+			filtered := []map[string]any{}
+			queryLower := strings.ToLower(input.Query)
+			for _, finding := range results {
+				title, _ := finding["title"].(string)
+				details, _ := finding["details"].(string)
+				if strings.Contains(strings.ToLower(title), queryLower) ||
+					strings.Contains(strings.ToLower(details), queryLower) {
+					filtered = append(filtered, finding)
+				}
+			}
+			results = filtered
+		}
+
+		return SearchFindingsOutput{
+			Success:  true,
+			Findings: results,
+			Count:    len(results),
+		}, nil
+	}
+	searchFindingsTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "search_findings",
+			Description: "Search through previously saved findings. Use this to recall leads, contacts, or any data you saved earlier. You can filter by category (e.g., 'lead', 'contact', 'product') or search by keyword.",
+		},
+		searchFindingsHandler,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create search_findings tool: %w", err)
+	}
+	tools = append(tools, searchFindingsTool)
+
+	// Multi-tab tools
+	newTabHandler := func(ctx tool.Context, input NewTabInput) (NewTabOutput, error) {
+		if a.browser == nil {
+			return NewTabOutput{Success: false, Message: "Browser not initialized"}, nil
+		}
+
+		a.preAction()
+		defer a.postAction()
+
+		a.logger.Info("new_tab: Opening: %s", input.URL)
+
+		tabID, err := a.browser.NewTab(context.Background(), input.URL)
+		if err != nil {
+			a.logger.ActionResult(false, err.Error())
+			return NewTabOutput{Success: false, Message: err.Error()}, nil
+		}
+
+		return NewTabOutput{
+			Success: true,
+			Message: fmt.Sprintf("Opened new tab: %s", tabID),
+			TabID:   tabID,
+			URL:     input.URL,
+		}, nil
+	}
+	newTabTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "new_tab",
+			Description: "Open a new browser tab with the specified URL. Returns the tab ID for later reference.",
+		},
+		newTabHandler,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create new_tab tool: %w", err)
+	}
+	tools = append(tools, newTabTool)
+
+	switchTabHandler := func(ctx tool.Context, input SwitchTabInput) (SwitchTabOutput, error) {
+		if a.browser == nil {
+			return SwitchTabOutput{Success: false, Message: "Browser not initialized"}, nil
+		}
+
+		a.preAction()
+		defer a.postAction()
+
+		a.logger.Info("switch_tab: Switching to: %s", input.TabID)
+
+		err := a.browser.SwitchTab(context.Background(), input.TabID)
+		if err != nil {
+			a.logger.ActionResult(false, err.Error())
+			return SwitchTabOutput{Success: false, Message: err.Error()}, nil
+		}
+
+		return SwitchTabOutput{
+			Success: true,
+			Message: fmt.Sprintf("Switched to tab: %s", input.TabID),
+			URL:     a.browser.GetURL(),
+			Title:   a.browser.GetTitle(),
+		}, nil
+	}
+	switchTabTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "switch_tab",
+			Description: "Switch to a different browser tab by its ID. Use list_tabs to see available tabs.",
+		},
+		switchTabHandler,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create switch_tab tool: %w", err)
+	}
+	tools = append(tools, switchTabTool)
+
+	closeTabHandler := func(ctx tool.Context, input CloseTabInput) (CloseTabOutput, error) {
+		if a.browser == nil {
+			return CloseTabOutput{Success: false, Message: "Browser not initialized"}, nil
+		}
+
+		a.logger.Info("close_tab: Closing: %s", input.TabID)
+
+		err := a.browser.CloseTab(context.Background(), input.TabID)
+		if err != nil {
+			a.logger.ActionResult(false, err.Error())
+			return CloseTabOutput{Success: false, Message: err.Error()}, nil
+		}
+
+		return CloseTabOutput{
+			Success: true,
+			Message: fmt.Sprintf("Closed tab: %s", input.TabID),
+		}, nil
+	}
+	closeTabTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "close_tab",
+			Description: "Close a browser tab by its ID.",
+		},
+		closeTabHandler,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create close_tab tool: %w", err)
+	}
+	tools = append(tools, closeTabTool)
+
+	listTabsHandler := func(ctx tool.Context, input ListTabsInput) (ListTabsOutput, error) {
+		if a.browser == nil {
+			return ListTabsOutput{Success: false, Error: "Browser not initialized"}, nil
+		}
+
+		tabs := a.browser.ListTabs(context.Background())
+		activeTab := a.browser.GetActiveTabID()
+
+		var tabInfos []TabInfo
+		for _, tab := range tabs {
+			tabInfos = append(tabInfos, TabInfo{
+				TabID:  tab.ID,
+				URL:    tab.URL,
+				Title:  tab.Title,
+				Active: tab.ID == activeTab,
+			})
+		}
+
+		return ListTabsOutput{
+			Success:   true,
+			Tabs:      tabInfos,
+			ActiveTab: activeTab,
+		}, nil
+	}
+	listTabsTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "list_tabs",
+			Description: "List all open browser tabs with their IDs, URLs, and titles.",
+		},
+		listTabsHandler,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create list_tabs tool: %w", err)
+	}
+	tools = append(tools, listTabsTool)
 
 	// Request human takeover tool
 	humanTakeoverHandler := func(ctx tool.Context, input HumanTakeoverInput) (HumanTakeoverOutput, error) {
@@ -498,9 +737,15 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 	doneHandler := func(ctx tool.Context, input DoneInput) (DoneOutput, error) {
 		a.logger.Done(input.Success, input.Summary)
 
+		// Get all findings count from agent's internal store
+		a.findingsMu.RLock()
+		totalFindings := len(a.findings)
+		a.findingsMu.RUnlock()
+
 		return DoneOutput{
-			Success: input.Success,
-			Summary: input.Summary,
+			Success:       input.Success,
+			Summary:       input.Summary,
+			TotalFindings: totalFindings,
 		}, nil
 	}
 	doneTool, err := functiontool.New(
@@ -516,6 +761,24 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 	tools = append(tools, doneTool)
 
 	return tools, nil
+}
+
+// Helper functions
+
+func sanitizeFilename(s string) string {
+	// Simple sanitization - replace non-alphanumeric with underscore
+	result := ""
+	for _, c := range s {
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
+			result += string(c)
+		} else if len(result) > 0 && result[len(result)-1] != '_' {
+			result += "_"
+		}
+	}
+	if len(result) > 50 {
+		result = result[:50]
+	}
+	return result
 }
 
 // Tool input/output types
@@ -597,6 +860,81 @@ type GetPageStateOutput struct {
 	Error      string `json:"error,omitempty"`
 }
 
+// Memory tools input/output types
+
+type SaveFindingInput struct {
+	Category string `json:"category" jsonschema:"Category of the finding (e.g., 'lead', 'contact', 'product', 'link', 'data')"`
+	Title    string `json:"title" jsonschema:"Short title or identifier for this finding"`
+	Details  string `json:"details" jsonschema:"Detailed information about this finding (include all relevant data)"`
+}
+
+type SaveFindingOutput struct {
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	FindingID  string `json:"finding_id"`
+	TotalSaved int    `json:"total_saved"`
+}
+
+type SearchFindingsInput struct {
+	Query    string `json:"query" jsonschema:"Search query to find relevant findings"`
+	Category string `json:"category,omitempty" jsonschema:"Optional: filter by category (e.g., 'lead', 'contact')"`
+}
+
+type SearchFindingsOutput struct {
+	Success  bool             `json:"success"`
+	Findings []map[string]any `json:"findings"`
+	Count    int              `json:"count"`
+}
+
+// Multi-tab input/output types
+
+type NewTabInput struct {
+	URL string `json:"url" jsonschema:"The URL to open in the new tab"`
+}
+
+type NewTabOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	TabID   string `json:"tab_id"`
+	URL     string `json:"url"`
+}
+
+type SwitchTabInput struct {
+	TabID string `json:"tab_id" jsonschema:"The ID of the tab to switch to"`
+}
+
+type SwitchTabOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+	URL     string `json:"url"`
+	Title   string `json:"title"`
+}
+
+type CloseTabInput struct {
+	TabID string `json:"tab_id" jsonschema:"The ID of the tab to close"`
+}
+
+type CloseTabOutput struct {
+	Success bool   `json:"success"`
+	Message string `json:"message"`
+}
+
+type ListTabsInput struct{}
+
+type TabInfo struct {
+	TabID  string `json:"tab_id"`
+	URL    string `json:"url"`
+	Title  string `json:"title"`
+	Active bool   `json:"active"`
+}
+
+type ListTabsOutput struct {
+	Success   bool      `json:"success"`
+	Tabs      []TabInfo `json:"tabs"`
+	ActiveTab string    `json:"active_tab"`
+	Error     string    `json:"error,omitempty"`
+}
+
 type HumanTakeoverInput struct {
 	Reason string `json:"reason" jsonschema:"Why human intervention is needed"`
 }
@@ -614,8 +952,9 @@ type DoneInput struct {
 }
 
 type DoneOutput struct {
-	Success bool   `json:"success"`
-	Summary string `json:"summary"`
+	Success       bool   `json:"success"`
+	Summary       string `json:"summary"`
+	TotalFindings int    `json:"total_findings"`
 }
 
 // GetADKAgent returns the underlying ADK agent for advanced use cases.
@@ -628,9 +967,9 @@ func (a *BrowserAgent) GetBrowser() *browser.Browser {
 	return a.browser
 }
 
-// GetMemory returns the memory manager.
-func (a *BrowserAgent) GetMemory() *memory.Manager {
-	return a.memory
+// Tools returns the browser tools for use in other agents.
+func (a *BrowserAgent) Tools() []tool.Tool {
+	return a.tools
 }
 
 // Result represents the result of a task execution.

@@ -120,7 +120,8 @@ func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap,
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
@@ -129,7 +130,7 @@ func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap,
 	}
 
 	// First, clear any existing annotations
-	_, err := b.page.Eval(`() => {
+	_, err := page.Eval(`() => {
 		const existing = document.getElementById('bua-annotation-container');
 		if (existing) existing.remove();
 	}`)
@@ -139,7 +140,7 @@ func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap,
 
 	// Inject CSS
 	css := annotationCSS(cfg.Opacity)
-	_, err = b.page.Eval(fmt.Sprintf(`() => {
+	_, err = page.Eval(fmt.Sprintf(`() => {
 		let style = document.getElementById('bua-annotation-style');
 		if (!style) {
 			style = document.createElement('style');
@@ -153,7 +154,7 @@ func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap,
 	}
 
 	// Create overlay container
-	_, err = b.page.Eval(`() => {
+	_, err = page.Eval(`() => {
 		const container = document.createElement('div');
 		container.id = 'bua-annotation-container';
 		container.className = 'bua-annotation-overlay';
@@ -210,7 +211,7 @@ func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap,
 			labelText,
 		)
 
-		_, err = b.page.Eval(js)
+		_, err = page.Eval(js)
 		if err != nil {
 			// Continue with other elements even if one fails
 			continue
@@ -225,11 +226,12 @@ func (b *Browser) HideAnnotations(ctx context.Context) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		return fmt.Errorf("no active page")
 	}
 
-	_, err := b.page.Eval(`() => {
+	_, err := page.Eval(`() => {
 		const container = document.getElementById('bua-annotation-container');
 		if (container) container.remove();
 		const style = document.getElementById('bua-annotation-style');
@@ -245,14 +247,15 @@ func (b *Browser) HideAnnotations(ctx context.Context) error {
 // ToggleAnnotations shows or hides annotations based on current state.
 func (b *Browser) ToggleAnnotations(ctx context.Context, elements *dom.ElementMap, cfg *AnnotationConfig) (bool, error) {
 	b.mu.RLock()
-	if b.page == nil {
+	page := b.getActivePageLocked()
+	if page == nil {
 		b.mu.RUnlock()
 		return false, fmt.Errorf("no active page")
 	}
 	b.mu.RUnlock()
 
 	// Check if annotations currently exist
-	result, err := b.page.Eval(`() => {
+	result, err := page.Eval(`() => {
 		return document.getElementById('bua-annotation-container') !== null;
 	}`)
 	if err != nil {

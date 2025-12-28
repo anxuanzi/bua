@@ -14,6 +14,8 @@ import (
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	adkagent "google.golang.org/adk/agent"
+	"google.golang.org/adk/artifact"
+	"google.golang.org/adk/memory"
 	"google.golang.org/adk/runner"
 	"google.golang.org/adk/session"
 	"google.golang.org/genai"
@@ -21,7 +23,6 @@ import (
 	"github.com/anxuanzi/bua-go/agent"
 	"github.com/anxuanzi/bua-go/browser"
 	"github.com/anxuanzi/bua-go/dom"
-	"github.com/anxuanzi/bua-go/memory"
 	"github.com/anxuanzi/bua-go/screenshot"
 )
 
@@ -52,12 +53,9 @@ type Config struct {
 	// ScreenshotConfig configures screenshot capture and storage.
 	ScreenshotConfig *screenshot.Config
 
-	// MemoryConfig configures the memory system.
-	MemoryConfig *memory.Config
-
 	// MaxTokens is the maximum context window size for the LLM.
 	// Used for token management and conversation compaction.
-	// Defaults to 128000 if zero.
+	// Defaults to 1048576 if zero.
 	MaxTokens int
 
 	// Debug enables verbose logging.
@@ -125,13 +123,14 @@ type Step struct {
 
 // Agent is the main interface for browser automation.
 type Agent struct {
-	config         Config
-	browser        *browser.Browser
-	memory         *memory.Manager
-	launcher       *launcher.Launcher
-	browserAgent   *agent.BrowserAgent
-	runner         *runner.Runner
-	sessionService session.Service
+	config          Config
+	browser         *browser.Browser
+	launcher        *launcher.Launcher
+	browserAgent    *agent.BrowserAgent
+	runner          *runner.Runner
+	sessionService  session.Service
+	memoryService   memory.Service
+	artifactService artifact.Service
 
 	mu     sync.Mutex
 	closed bool
@@ -164,12 +163,6 @@ func New(cfg Config) (*Agent, error) {
 			MaxScreenshots: 100,
 		}
 	}
-	if cfg.MemoryConfig == nil {
-		cfg.MemoryConfig = &memory.Config{
-			ShortTermLimit: 10,
-			StorageDir:     filepath.Join(cfg.ProfileDir, "..", "memory"),
-		}
-	}
 
 	// Validate required fields
 	if cfg.APIKey == "" {
@@ -177,11 +170,11 @@ func New(cfg Config) (*Agent, error) {
 	}
 
 	// Create the agent
-	agent := &Agent{
+	a := &Agent{
 		config: cfg,
 	}
 
-	return agent, nil
+	return a, nil
 }
 
 // Start initializes the browser and prepares the agent for task execution.
@@ -237,15 +230,6 @@ func (a *Agent) Start(ctx context.Context) error {
 		ScreenshotConfig: a.config.ScreenshotConfig,
 	})
 
-	// Initialize memory manager
-	a.memory = memory.NewManager(a.config.MemoryConfig)
-	if err := a.memory.Load(ctx); err != nil {
-		// Log warning but don't fail - start with empty memory
-		if a.config.Debug {
-			fmt.Printf("Warning: failed to load memory: %v\n", err)
-		}
-	}
-
 	// Determine screenshot directory for annotations
 	screenshotDir := ""
 	if a.config.ShowAnnotations {
@@ -261,7 +245,7 @@ func (a *Agent) Start(ctx context.Context) error {
 		Debug:           a.config.Debug,
 		ShowAnnotations: a.config.ShowAnnotations,
 		ScreenshotDir:   screenshotDir,
-	}, a.browser, a.memory)
+	}, a.browser)
 
 	if err := a.browserAgent.Init(ctx); err != nil {
 		return fmt.Errorf("failed to initialize ADK agent: %w", err)
@@ -273,13 +257,17 @@ func (a *Agent) Start(ctx context.Context) error {
 		return fmt.Errorf("ADK agent not initialized")
 	}
 
-	// Create session service
+	// Create ADK services
 	a.sessionService = session.InMemoryService()
+	a.memoryService = memory.InMemoryService()
+	a.artifactService = artifact.InMemoryService()
 
 	r, err := runner.New(runner.Config{
-		AppName:        "bua-browser-agent",
-		Agent:          adkAgent,
-		SessionService: a.sessionService,
+		AppName:         "bua-browser-agent",
+		Agent:           adkAgent,
+		SessionService:  a.sessionService,
+		MemoryService:   a.memoryService,
+		ArtifactService: a.artifactService,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create ADK runner: %w", err)
@@ -480,13 +468,6 @@ func (a *Agent) Close() error {
 	a.closed = true
 
 	var errs []error
-
-	// Save memory before closing
-	if a.memory != nil {
-		if err := a.memory.Save(context.Background()); err != nil {
-			errs = append(errs, fmt.Errorf("failed to save memory: %w", err))
-		}
-	}
 
 	// Close browser
 	if a.browser != nil {
