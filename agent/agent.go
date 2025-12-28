@@ -287,20 +287,30 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 			return ScrollOutput{Success: false, Message: "Invalid direction. Use: up or down"}, nil
 		}
 
-		err := a.browser.Scroll(context.Background(), 0, deltaY)
+		var err error
+		var msg string
+
+		// Check if we're scrolling within a specific element (e.g., modal, popup)
+		if input.ElementID > 0 {
+			err = a.browser.ScrollInElement(context.Background(), input.ElementID, 0, deltaY)
+			msg = fmt.Sprintf("Scrolled %s by %d pixels within element %d", input.Direction, amount, input.ElementID)
+		} else {
+			err = a.browser.Scroll(context.Background(), 0, deltaY)
+			msg = fmt.Sprintf("Scrolled %s by %d pixels", input.Direction, amount)
+		}
+
 		if err != nil {
 			a.logger.ActionResult(false, err.Error())
 			return ScrollOutput{Success: false, Message: err.Error()}, nil
 		}
 
-		msg := fmt.Sprintf("Scrolled %s by %d pixels", input.Direction, amount)
 		a.logger.ActionResult(true, msg)
 		return ScrollOutput{Success: true, Message: msg}, nil
 	}
 	scrollTool, err := functiontool.New(
 		functiontool.Config{
 			Name:        "scroll",
-			Description: "Scroll the page in a direction (up or down) to reveal more content.",
+			Description: "Scroll the page or a specific scrollable element (modal, sidebar, popup) in a direction (up or down). Use element_id to scroll within a container like Instagram's comment modal.",
 		},
 		scrollHandler,
 	)
@@ -858,6 +868,7 @@ type TypeOutput struct {
 type ScrollInput struct {
 	Direction string `json:"direction" jsonschema:"Direction to scroll: up or down"`
 	Amount    int    `json:"amount" jsonschema:"Amount to scroll in pixels (default 500)"`
+	ElementID int    `json:"element_id,omitempty" jsonschema:"Optional element ID of a scrollable container (e.g., modal, sidebar). If not provided, scrolls the entire page."`
 	Reasoning string `json:"reasoning" jsonschema:"Brief explanation of why you're scrolling"`
 }
 

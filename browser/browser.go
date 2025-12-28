@@ -417,6 +417,46 @@ func (b *Browser) ScrollToElement(ctx context.Context, elementIndex int) error {
 	return nil
 }
 
+// ScrollInElement scrolls within a specific scrollable element (e.g., modal, sidebar).
+// This is useful for scrolling within containers that have their own scroll bars,
+// like Instagram comment modals, chat windows, or dropdown lists.
+func (b *Browser) ScrollInElement(ctx context.Context, elementIndex int, deltaX, deltaY float64) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	page := b.getActivePageLocked()
+	if page == nil {
+		return fmt.Errorf("no active page")
+	}
+
+	elements, err := dom.ExtractElementMap(ctx, page)
+	if err != nil {
+		return fmt.Errorf("failed to get element map: %w", err)
+	}
+
+	el, ok := elements.ByIndex(elementIndex)
+	if !ok {
+		return fmt.Errorf("element with index %d not found", elementIndex)
+	}
+
+	// Use JavaScript to scroll within the element
+	// scrollBy is the most reliable way to scroll within a specific container
+	_, err = page.Eval(fmt.Sprintf(
+		`(function() {
+			const el = document.querySelector('[data-bua-index="%d"]');
+			if (!el) return false;
+			el.scrollBy({top: %f, left: %f, behavior: 'smooth'});
+			return true;
+		})()`,
+		el.Index, deltaY, deltaX,
+	))
+	if err != nil {
+		return fmt.Errorf("failed to scroll in element: %w", err)
+	}
+
+	return nil
+}
+
 // WaitForNavigation waits for a navigation to complete.
 func (b *Browser) WaitForNavigation(ctx context.Context) error {
 	b.mu.RLock()

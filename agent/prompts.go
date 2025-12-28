@@ -29,7 +29,7 @@ You can use these tools to interact with the page:
 
 - **click(element_index)**: Click on an element by its index number
 - **type(element_index, text)**: Type text into an input field
-- **scroll(direction, amount)**: Scroll the page (up, down, left, right)
+- **scroll(direction, amount, element_id)**: Scroll the page or a specific scrollable element (modal, sidebar, popup)
 - **navigate(url)**: Go to a specific URL
 - **wait(reason)**: Wait for the page to stabilize
 - **extract(element_index, fields)**: Extract data from an element or page
@@ -68,6 +68,16 @@ You can use these tools to interact with the page:
 2. After scrolling, wait for new content to load
 3. Check the updated element map for new elements
 
+### Scrolling within modals, popups, or sidebars
+Some pages have scrollable containers (modals, comment sections, chat windows, dropdowns) that scroll independently from the page.
+
+1. Identify the scrollable container in the element map (look for elements with role="dialog", role="listbox", or container divs)
+2. Note the element's index number
+3. Use scroll(direction="down", element_id=<container_index>) to scroll within that container
+4. The page itself won't move - only the content inside the container will scroll
+
+Example: Instagram comments appear in a modal dialog. Find the modal container (e.g., [42] div role="dialog"), then use scroll(direction="down", element_id=42) to load more comments.
+
 ### Handling pagination
 1. Look for "Next", "More", page numbers, or arrow buttons
 2. Click to navigate between pages
@@ -78,7 +88,8 @@ You can use these tools to interact with the page:
 - Element indices may change after page updates - always use the most recent element map
 - Some elements may be visually present but not in the element map if they're not interactive
 - When typing, the element must be focused (clickable input fields)
-- After login or significant actions, wait for the page to fully load before proceeding`
+- After login or significant actions, wait for the page to fully load before proceeding
+- Modals and popups often have their own scroll containers - use element_id parameter to scroll within them instead of scrolling the page`
 }
 
 // TaskPromptTemplate returns a template for the task prompt.
@@ -176,15 +187,18 @@ Note: The element will be clicked first to focus it, then the text will be typed
 
 Example: To type "hello" into a search box shown as [3], use type(element_index=3, text="hello").`,
 
-		"scroll": `Scroll the page in a direction.
+		"scroll": `Scroll the page or a specific scrollable element (modal, sidebar, popup) in a direction.
 
 Parameters:
 - direction (string, required): One of "up", "down", "left", "right".
 - amount (int, optional): Scroll amount in pixels (default 500).
+- element_id (int, optional): The index of a scrollable container (e.g., modal, sidebar). If not provided, scrolls the entire page.
 
-Use when: You need to see more content not currently visible, or navigate through a long page.
+Use when: You need to see more content not currently visible, or navigate through a long page or scrollable container.
 
-Example: To scroll down to see more content, use scroll(direction="down", amount=500).`,
+Examples:
+- To scroll the page down: scroll(direction="down", amount=500)
+- To scroll within a modal/popup (e.g., Instagram comments): scroll(direction="down", amount=300, element_id=42)`,
 
 		"navigate": `Navigate to a URL.
 

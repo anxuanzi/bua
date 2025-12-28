@@ -87,6 +87,9 @@ type ScrollParams struct {
 	Direction string `json:"direction" description:"The scroll direction: up, down, left, or right"`
 	// Amount is the scroll amount in pixels (default 500).
 	Amount int `json:"amount,omitempty" description:"The scroll amount in pixels (default 500)"`
+	// ElementID is the optional index of a scrollable container (modal, sidebar, popup).
+	// If not provided, scrolls the entire page.
+	ElementID int `json:"element_id,omitempty" description:"Optional element index of a scrollable container (e.g., modal, sidebar). If not provided, scrolls the entire page."`
 }
 
 // ScrollResult holds the result of a scroll action.
@@ -95,9 +98,10 @@ type ScrollResult struct {
 	Message string `json:"message"`
 }
 
-// Scroll scrolls the page in the specified direction.
+// Scroll scrolls the page or a specific scrollable element in the specified direction.
 // Use this action to reveal more content that is not currently visible.
 // Scrolling down is useful for infinite scroll pages or to see more items.
+// Use element_id to scroll within a specific container like a modal or sidebar.
 func Scroll(ctx context.Context, bc *BrowserContext, params ScrollParams) (*ScrollResult, error) {
 	if bc.Browser == nil {
 		return &ScrollResult{Success: false, Message: "Browser not initialized"}, nil
@@ -122,14 +126,25 @@ func Scroll(ctx context.Context, bc *BrowserContext, params ScrollParams) (*Scro
 		return &ScrollResult{Success: false, Message: "Invalid direction. Use: up, down, left, right"}, nil
 	}
 
-	err := bc.Browser.Scroll(ctx, deltaX, deltaY)
+	var err error
+	var msg string
+
+	// Check if we're scrolling within a specific element (e.g., modal, popup)
+	if params.ElementID > 0 {
+		err = bc.Browser.ScrollInElement(ctx, params.ElementID, deltaX, deltaY)
+		msg = fmt.Sprintf("Scrolled %s by %d pixels within element %d", params.Direction, amount, params.ElementID)
+	} else {
+		err = bc.Browser.Scroll(ctx, deltaX, deltaY)
+		msg = fmt.Sprintf("Scrolled %s by %d pixels", params.Direction, amount)
+	}
+
 	if err != nil {
 		return &ScrollResult{Success: false, Message: err.Error()}, nil
 	}
 
 	return &ScrollResult{
 		Success: true,
-		Message: fmt.Sprintf("Scrolled %s by %d pixels", params.Direction, amount),
+		Message: msg,
 	}, nil
 }
 

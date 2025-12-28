@@ -75,11 +75,18 @@ adkagent "google.golang.org/adk/agent"
 ### Browser Tools (defined in agent/agent.go)
 
 10 tools available to the LLM:
-- `click`, `type_text`, `scroll`, `navigate`, `wait`
+- `click`, `type_text`, `navigate`, `wait`
+- `scroll` - Supports both page-level scrolling and element-specific scrolling (for modals, sidebars, popups like Instagram comments)
 - `extract`, `get_page_state`, `download_file`
 - `request_human_takeover`, `done`
 
 Each tool uses Input/Output struct pairs with jsonschema tags for parameter descriptions.
+
+**Scroll tool details** (`agent/agent.go`, `browser/browser.go`):
+- `direction`: up, down (required)
+- `amount`: pixels to scroll (default 500)
+- `element_id`: optional index of scrollable container for modal/popup scrolling
+- Uses `Browser.Scroll()` for page scrolling, `Browser.ScrollInElement()` for container scrolling
 
 ### Dual-Use Architecture (export/adktool.go)
 
