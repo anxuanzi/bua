@@ -62,11 +62,13 @@ func (b *Browser) Navigate(ctx context.Context, url string) error {
 		}
 		b.page = page
 
-		// Set viewport if configured
+		// Set viewport if configured - with proper responsive handling
 		if b.config.Viewport != nil {
 			err := b.page.SetViewport(&proto.EmulationSetDeviceMetricsOverride{
-				Width:  b.config.Viewport.Width,
-				Height: b.config.Viewport.Height,
+				Width:             b.config.Viewport.Width,
+				Height:            b.config.Viewport.Height,
+				DeviceScaleFactor: 1.0,
+				Mobile:            false, // Desktop mode for proper responsiveness
 			})
 			if err != nil {
 				return fmt.Errorf("failed to set viewport: %w", err)
@@ -84,6 +86,9 @@ func (b *Browser) Navigate(ctx context.Context, url string) error {
 	if err != nil {
 		return fmt.Errorf("failed to wait for page load: %w", err)
 	}
+
+	// Wait for page to stabilize (animations, lazy loading, etc.)
+	b.page.MustWaitStable()
 
 	return nil
 }

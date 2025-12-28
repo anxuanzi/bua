@@ -30,7 +30,7 @@ type Config struct {
 	// APIKey is the API key for the LLM provider (e.g., Gemini API key).
 	APIKey string
 
-	// Model is the model ID to use (e.g., "gemini-3-pro-preview", "gemini-3-flash-preview").
+	// Model is the model ID to use (e.g., "gemini-2.5-flash", "gemini-2.5-pro").
 	Model string
 
 	// ProfileName is the name of the browser profile to use for session persistence.
@@ -115,12 +115,13 @@ type Step struct {
 
 // Agent is the main interface for browser automation.
 type Agent struct {
-	config       Config
-	browser      *browser.Browser
-	memory       *memory.Manager
-	launcher     *launcher.Launcher
-	browserAgent *agent.BrowserAgent
-	runner       *runner.Runner
+	config         Config
+	browser        *browser.Browser
+	memory         *memory.Manager
+	launcher       *launcher.Launcher
+	browserAgent   *agent.BrowserAgent
+	runner         *runner.Runner
+	sessionService session.Service
 
 	mu     sync.Mutex
 	closed bool
@@ -130,7 +131,7 @@ type Agent struct {
 func New(cfg Config) (*Agent, error) {
 	// Apply defaults
 	if cfg.Model == "" {
-		cfg.Model = "gemini-3-pro-preview"
+		cfg.Model = "gemini-2.5-flash"
 	}
 	if cfg.Viewport == nil {
 		cfg.Viewport = DesktopViewport
@@ -191,12 +192,15 @@ func (a *Agent) Start(ctx context.Context) error {
 		}
 	}
 
-	// Create launcher
-	a.launcher = launcher.New()
+	// Create launcher with proper window size
+	a.launcher = launcher.New().
+		Set("window-size", fmt.Sprintf("%d,%d", a.config.Viewport.Width, a.config.Viewport.Height)).
+		Set("disable-blink-features", "AutomationControlled"). // Avoid detection
+		Headless(a.config.Headless)
+
 	if userDataDir != "" {
 		a.launcher = a.launcher.UserDataDir(userDataDir)
 	}
-	a.launcher = a.launcher.Headless(a.config.Headless)
 
 	// Launch browser
 	controlURL, err := a.launcher.Launch()
@@ -247,10 +251,13 @@ func (a *Agent) Start(ctx context.Context) error {
 		return fmt.Errorf("ADK agent not initialized")
 	}
 
+	// Create session service
+	a.sessionService = session.InMemoryService()
+
 	r, err := runner.New(runner.Config{
 		AppName:        "bua-browser-agent",
 		Agent:          adkAgent,
-		SessionService: session.InMemoryService(),
+		SessionService: a.sessionService,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create ADK runner: %w", err)
@@ -263,11 +270,12 @@ func (a *Agent) Start(ctx context.Context) error {
 // Run executes a task with the given natural language prompt.
 func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 	a.mu.Lock()
-	if a.browser == nil || a.browserAgent == nil || a.runner == nil {
+	if a.browser == nil || a.browserAgent == nil || a.runner == nil || a.sessionService == nil {
 		a.mu.Unlock()
 		return nil, fmt.Errorf("agent not started, call Start() first")
 	}
 	r := a.runner
+	ss := a.sessionService
 	a.mu.Unlock()
 
 	// Create user message
@@ -278,11 +286,16 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 		},
 	}
 
-	// Generate unique session ID for this run
-	sessionID := fmt.Sprintf("session_%d", ctx.Value("session_id"))
-	if sessionID == "session_<nil>" {
-		sessionID = "default_session"
+	// Create a new session for this run
+	userID := "default_user"
+	createResp, err := ss.Create(ctx, &session.CreateRequest{
+		AppName: "bua-browser-agent",
+		UserID:  userID,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
+	sessionID := createResp.Session.ID()
 
 	// Execute the agent and collect events
 	result := &Result{
@@ -292,7 +305,9 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 	}
 
 	var lastResponse string
-	for event, err := range r.Run(ctx, "user", sessionID, userMessage, adkagent.RunConfig{}) {
+	var extractedData string
+	var doneSummary string
+	for event, err := range r.Run(ctx, userID, sessionID, userMessage, adkagent.RunConfig{}) {
 		if err != nil {
 			result.Success = false
 			result.Error = err.Error()
@@ -300,17 +315,65 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 		}
 
 		// Process events from the agent
-		if event != nil && event.Content != nil {
-			for _, part := range event.Content.Parts {
-				if part != nil && part.Text != "" {
-					lastResponse = part.Text
+		if event != nil {
+			if a.config.Debug {
+				fmt.Printf("[DEBUG] Event: Author=%s, Partial=%v\n", event.Author, event.Partial)
+			}
+			if event.Content != nil {
+				for i, part := range event.Content.Parts {
+					if part != nil {
+						if a.config.Debug {
+							if part.Text != "" {
+								fmt.Printf("[DEBUG] Part[%d] Text: %s\n", i, truncateString(part.Text, 200))
+							}
+							if part.FunctionCall != nil {
+								fmt.Printf("[DEBUG] Part[%d] FunctionCall: %s(%v)\n", i, part.FunctionCall.Name, truncateString(fmt.Sprintf("%v", part.FunctionCall.Args), 100))
+							}
+							if part.FunctionResponse != nil {
+								fmt.Printf("[DEBUG] Part[%d] FunctionResponse: %s -> %v\n", i, part.FunctionResponse.Name, truncateString(fmt.Sprintf("%v", part.FunctionResponse.Response), 100))
+							}
+						}
+						if part.Text != "" {
+							lastResponse = part.Text
+						}
+						// Capture data from the done tool call
+						if part.FunctionCall != nil && part.FunctionCall.Name == "done" {
+							args := part.FunctionCall.Args
+							if data, exists := args["extracted_data"]; exists {
+								if dataStr, ok := data.(string); ok {
+									extractedData = dataStr
+								}
+							}
+							if summary, exists := args["summary"]; exists {
+								if summaryStr, ok := summary.(string); ok {
+									doneSummary = summaryStr
+								}
+							}
+							if success, exists := args["success"]; exists {
+								if successBool, ok := success.(bool); ok {
+									result.Success = successBool
+								}
+							}
+						}
+					}
 				}
 			}
 		}
 	}
 
-	if lastResponse != "" {
+	// Build result data
+	if extractedData != "" {
+		// Try to parse extracted_data as JSON
+		var parsed any
+		if err := json.Unmarshal([]byte(extractedData), &parsed); err == nil {
+			result.Data = map[string]any{"extracted_data": parsed, "summary": doneSummary}
+		} else {
+			result.Data = map[string]any{"extracted_data": extractedData, "summary": doneSummary}
+		}
+	} else if lastResponse != "" {
 		result.Data = map[string]any{"response": lastResponse}
+	} else if doneSummary != "" {
+		result.Data = map[string]any{"summary": doneSummary}
 	}
 
 	return result, nil
@@ -431,6 +494,17 @@ func (a *Agent) Page() *rod.Page {
 		return nil
 	}
 	return a.browser.Page()
+}
+
+// truncateString truncates a string to maxLen characters, adding "..." if truncated.
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	if maxLen <= 3 {
+		return s[:maxLen]
+	}
+	return s[:maxLen-3] + "..."
 }
 
 // Call executes a raw CDP command on the current page.

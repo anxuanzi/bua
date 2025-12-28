@@ -392,8 +392,8 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 // Tool input/output types
 
 type ClickInput struct {
-	ElementIndex int    `json:"element_index" jsonschema:"description=The index number of the element to click (shown in the element map)"`
-	Reasoning    string `json:"reasoning" jsonschema:"description=Brief explanation of why you're clicking this element"`
+	ElementIndex int    `json:"element_index" jsonschema:"The index number of the element to click (shown in the element map)"`
+	Reasoning    string `json:"reasoning" jsonschema:"Brief explanation of why you're clicking this element"`
 }
 
 type ClickOutput struct {
@@ -402,9 +402,9 @@ type ClickOutput struct {
 }
 
 type TypeInput struct {
-	ElementIndex int    `json:"element_index" jsonschema:"description=The index number of the input element"`
-	Text         string `json:"text" jsonschema:"description=The text to type into the element"`
-	Reasoning    string `json:"reasoning" jsonschema:"description=Brief explanation of why you're typing this text"`
+	ElementIndex int    `json:"element_index" jsonschema:"The index number of the input element"`
+	Text         string `json:"text" jsonschema:"The text to type into the element"`
+	Reasoning    string `json:"reasoning" jsonschema:"Brief explanation of why you're typing this text"`
 }
 
 type TypeOutput struct {
@@ -413,9 +413,9 @@ type TypeOutput struct {
 }
 
 type ScrollInput struct {
-	Direction string `json:"direction" jsonschema:"description=Direction to scroll: 'up' or 'down',enum=up|down"`
-	Amount    int    `json:"amount" jsonschema:"description=Amount to scroll in pixels (default 500)"`
-	Reasoning string `json:"reasoning" jsonschema:"description=Brief explanation of why you're scrolling"`
+	Direction string `json:"direction" jsonschema:"Direction to scroll: up or down"`
+	Amount    int    `json:"amount" jsonschema:"Amount to scroll in pixels (default 500)"`
+	Reasoning string `json:"reasoning" jsonschema:"Brief explanation of why you're scrolling"`
 }
 
 type ScrollOutput struct {
@@ -424,8 +424,8 @@ type ScrollOutput struct {
 }
 
 type NavigateInput struct {
-	URL       string `json:"url" jsonschema:"description=The URL to navigate to"`
-	Reasoning string `json:"reasoning" jsonschema:"description=Brief explanation of why you're navigating to this URL"`
+	URL       string `json:"url" jsonschema:"The URL to navigate to"`
+	Reasoning string `json:"reasoning" jsonschema:"Brief explanation of why you're navigating to this URL"`
 }
 
 type NavigateOutput struct {
@@ -436,7 +436,7 @@ type NavigateOutput struct {
 }
 
 type WaitInput struct {
-	Reason string `json:"reason" jsonschema:"description=What you're waiting for"`
+	Reason string `json:"reason" jsonschema:"What you're waiting for"`
 }
 
 type WaitOutput struct {
@@ -445,8 +445,8 @@ type WaitOutput struct {
 }
 
 type ExtractInput struct {
-	ElementIndex  int    `json:"element_index" jsonschema:"description=The index of the element to extract from (-1 for entire page)"`
-	WhatToExtract string `json:"what_to_extract" jsonschema:"description=Description of what data to extract"`
+	ElementIndex  int    `json:"element_index" jsonschema:"The index of the element to extract from (-1 for entire page)"`
+	WhatToExtract string `json:"what_to_extract" jsonschema:"Description of what data to extract"`
 }
 
 type ExtractOutput struct {
@@ -456,7 +456,7 @@ type ExtractOutput struct {
 }
 
 type GetPageStateInput struct {
-	IncludeScreenshot bool `json:"include_screenshot" jsonschema:"description=Whether to include the annotated screenshot (default true)"`
+	IncludeScreenshot bool `json:"include_screenshot" jsonschema:"Whether to include the annotated screenshot (default true)"`
 }
 
 type GetPageStateOutput struct {
@@ -469,7 +469,7 @@ type GetPageStateOutput struct {
 }
 
 type HumanTakeoverInput struct {
-	Reason string `json:"reason" jsonschema:"description=Why human intervention is needed"`
+	Reason string `json:"reason" jsonschema:"Why human intervention is needed"`
 }
 
 type HumanTakeoverOutput struct {
@@ -479,9 +479,9 @@ type HumanTakeoverOutput struct {
 }
 
 type DoneInput struct {
-	Success       bool   `json:"success" jsonschema:"description=Whether the task was completed successfully"`
-	Summary       string `json:"summary" jsonschema:"description=Summary of what was accomplished"`
-	ExtractedData string `json:"extracted_data,omitempty" jsonschema:"description=Any data that was extracted during the task (as JSON)"`
+	Success       bool   `json:"success" jsonschema:"Whether the task was completed successfully"`
+	Summary       string `json:"summary" jsonschema:"Summary of what was accomplished"`
+	ExtractedData string `json:"extracted_data,omitempty" jsonschema:"Any data that was extracted during the task (as JSON)"`
 }
 
 type DoneOutput struct {
