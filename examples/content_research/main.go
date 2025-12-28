@@ -29,7 +29,7 @@ import (
 
 func main() {
 	// Load .env file from project root
-	if err := godotenv.Load("../../.env"); err != nil {
+	if err := godotenv.Load(".env"); err != nil {
 		log.Printf("Note: Could not load .env file: %v", err)
 	}
 
