@@ -95,3 +95,29 @@ Examples load with: `godotenv.Load("../../.env")`
 - ✅ Intelligently switched to DuckDuckGo
 - ✅ Completed search and clicked result
 - ✅ Screenshots saved for each step
+
+### Download Example (Dec 29, 2024)
+- ✅ Downloaded Go logo from go.dev (go-logo-white.svg, 1472 bytes)
+- ✅ Downloaded Rust logo from rust-lang.org (rust-logo-blk.svg, 2396 bytes)
+- ✅ Files saved to ~/.bua/downloads/
+
+### ADK Tool Example (Dec 29, 2024)
+- ✅ BrowserTool integrated as ADK tool in external agent
+- ✅ Research agent used browser_automation tool successfully
+- ✅ Extracted Go tagline: "Build simple, secure, scalable systems with Go"
+
+## New Features (Dec 29, 2024)
+
+### 6. Download Capability (browser/download.go)
+- ✅ `download_file` tool for programmatic downloads
+- ✅ Direct HTTP downloads (use_page_auth=false)
+- ✅ CDP resource download with page context (use_page_auth=true)
+- ✅ Auto-generated filenames from URL
+- ✅ Downloads saved to ~/.bua/downloads/
+
+### 7. Dual-Use Architecture (export/adktool.go)
+- ✅ BrowserTool wrapper for single browser instance
+- ✅ MultiBrowserTool for parallel browser management
+- ✅ SimpleBrowserTask convenience function
+- ✅ Can be embedded in other ADK applications as a tool
+- ✅ Actions: create, execute, close, list browsers

@@ -711,6 +711,57 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 	}
 	tools = append(tools, listTabsTool)
 
+	// Download file tool
+	downloadHandler := func(ctx tool.Context, input DownloadFileInput) (DownloadFileOutput, error) {
+		if a.browser == nil {
+			return DownloadFileOutput{Success: false, Message: "Browser not initialized"}, nil
+		}
+
+		a.logger.Info("download_file: Downloading from URL: %s (use_page_auth: %v)", input.URL, input.UsePageAuth)
+
+		cfg := browser.DefaultDownloadConfig()
+		// DefaultDownloadConfig already sets ~/.bua/downloads/
+
+		var downloadInfo *browser.DownloadInfo
+		var err error
+
+		if input.UsePageAuth {
+			// Use browser context with cookies/auth
+			downloadInfo, err = a.browser.DownloadResource(context.Background(), input.URL, cfg)
+		} else {
+			// Use direct HTTP download
+			downloadInfo, err = a.browser.DownloadFile(context.Background(), input.URL, cfg)
+		}
+
+		if err != nil {
+			a.logger.ActionResult(false, err.Error())
+			return DownloadFileOutput{Success: false, Message: err.Error()}, nil
+		}
+
+		msg := fmt.Sprintf("Downloaded: %s (%d bytes)", downloadInfo.Filename, downloadInfo.Size)
+		a.logger.ActionResult(true, msg)
+
+		return DownloadFileOutput{
+			Success:  true,
+			Message:  msg,
+			Filename: downloadInfo.Filename,
+			FilePath: downloadInfo.FilePath,
+			Size:     downloadInfo.Size,
+			MimeType: downloadInfo.MimeType,
+		}, nil
+	}
+	downloadTool, err := functiontool.New(
+		functiontool.Config{
+			Name:        "download_file",
+			Description: "Download a file from a URL. Use use_page_auth=true to use the browser's cookies and authentication context for authenticated downloads.",
+		},
+		downloadHandler,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create download_file tool: %w", err)
+	}
+	tools = append(tools, downloadTool)
+
 	// Request human takeover tool
 	humanTakeoverHandler := func(ctx tool.Context, input HumanTakeoverInput) (HumanTakeoverOutput, error) {
 		a.logger.HumanTakeover(input.Reason)
@@ -957,6 +1008,24 @@ type DoneOutput struct {
 	TotalFindings int    `json:"total_findings"`
 }
 
+// Download tool input/output types
+
+type DownloadFileInput struct {
+	URL         string `json:"url" jsonschema:"The URL of the file to download"`
+	Filename    string `json:"filename,omitempty" jsonschema:"Optional: custom filename for the downloaded file"`
+	UsePageAuth bool   `json:"use_page_auth,omitempty" jsonschema:"If true, use the page's cookies and auth context for the download"`
+	Reasoning   string `json:"reasoning" jsonschema:"Brief explanation of why you're downloading this file"`
+}
+
+type DownloadFileOutput struct {
+	Success  bool   `json:"success"`
+	Message  string `json:"message"`
+	Filename string `json:"filename,omitempty"`
+	FilePath string `json:"file_path,omitempty"`
+	Size     int64  `json:"size,omitempty"`
+	MimeType string `json:"mime_type,omitempty"`
+}
+
 // GetADKAgent returns the underlying ADK agent for advanced use cases.
 func (a *BrowserAgent) GetADKAgent() agent.Agent {
 	return a.adkAgent
@@ -970,6 +1039,23 @@ func (a *BrowserAgent) GetBrowser() *browser.Browser {
 // Tools returns the browser tools for use in other agents.
 func (a *BrowserAgent) Tools() []tool.Tool {
 	return a.tools
+}
+
+// GetFindings returns all findings collected during task execution.
+func (a *BrowserAgent) GetFindings() []map[string]any {
+	a.findingsMu.RLock()
+	defer a.findingsMu.RUnlock()
+
+	// Return a copy to prevent mutation
+	result := make([]map[string]any, len(a.findings))
+	for i, finding := range a.findings {
+		copied := make(map[string]any)
+		for k, v := range finding {
+			copied[k] = v
+		}
+		result[i] = copied
+	}
+	return result
 }
 
 // Result represents the result of a task execution.

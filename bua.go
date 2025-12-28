@@ -592,3 +592,20 @@ func (a *Agent) ToggleAnnotations(ctx context.Context, cfg *AnnotationConfig) (b
 
 	return a.browser.ToggleAnnotations(ctx, elements, cfg)
 }
+
+// GetAgent returns the underlying BrowserAgent for advanced use cases.
+func (a *Agent) GetAgent() *agent.BrowserAgent {
+	return a.browserAgent
+}
+
+// GetFindings returns all findings collected by the agent during task execution.
+func (a *Agent) GetFindings() []map[string]any {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+
+	if a.browserAgent == nil {
+		return nil
+	}
+
+	return a.browserAgent.GetFindings()
+}
