@@ -202,6 +202,9 @@ func TestAgentWithBrowser(t *testing.T) {
 	page := rodBrowser.MustPage("https://example.com")
 	defer page.MustClose()
 
+	// Wait for page to fully load
+	page.MustWaitLoad()
+
 	// Test page operations
 	t.Run("page title", func(t *testing.T) {
 		title := page.MustInfo().Title

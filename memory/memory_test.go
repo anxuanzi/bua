@@ -124,7 +124,8 @@ func TestManager_RecordSuccess(t *testing.T) {
 	m := NewManager(&Config{})
 	m.RecordSuccess("example.com", "click_login", "Successfully logged in")
 
-	results := m.SearchLongTermMemory("login", "example.com")
+	// Search for words that are actually in the Content field
+	results := m.SearchLongTermMemory("successfully", "example.com")
 	if len(results) == 0 {
 		t.Error("RecordSuccess() entry not found in search")
 	}
@@ -134,7 +135,8 @@ func TestManager_RecordFailure(t *testing.T) {
 	m := NewManager(&Config{})
 	m.RecordFailure("example.com", "click_submit", "Button not found")
 
-	results := m.SearchLongTermMemory("submit", "example.com")
+	// Search for words that are actually in the Content field
+	results := m.SearchLongTermMemory("button", "example.com")
 	if len(results) == 0 {
 		t.Error("RecordFailure() entry not found in search")
 	}
@@ -304,22 +306,28 @@ func TestManager_SearchLongTermMemory(t *testing.T) {
 		Site:    "another.com",
 	})
 
-	// Note: containsKeywords is a placeholder that returns true if both text and query are non-empty
-	// So any non-empty query matches all entries with non-empty content/key
+	// containsKeywords does case-insensitive multi-word matching
 	tests := []struct {
 		name     string
 		query    string
 		site     string
 		expected int
 	}{
-		// Any non-empty query matches all 3 entries (current placeholder behavior)
-		{"any query matches all with content", "anything", "", 3},
-		// Site filter works: only entries matching site are returned
-		{"site filter with query", "anything", "example.com", 1},
-		{"site filter different site", "anything", "other.com", 1},
-		// Empty query returns nothing (containsKeywords returns false for empty query)
+		// "login" matches entries 1 (key: "login-pattern") and 3 (key: "login-other", content has "Login")
+		{"login keyword matches two entries", "login", "", 2},
+		// "button" matches entries 1 and 2 (both have "button" in content)
+		{"button keyword matches two entries", "button", "", 2},
+		// Site filter works: "login" with site filter only matches example.com entry
+		{"site filter with matching query", "login", "example.com", 1},
+		{"site filter different site", "button", "other.com", 1},
+		// Non-matching query returns nothing
+		{"non-matching query", "nonexistent", "", 0},
+		// Empty query returns nothing
 		{"empty query returns nothing", "", "", 0},
 		{"empty query with site returns nothing", "", "example.com", 0},
+		// Multi-word query: all words must match
+		{"multi-word query all match", "login button", "example.com", 1},
+		{"multi-word query partial match", "login submit", "", 0}, // no entry has both words
 	}
 
 	for _, tt := range tests {

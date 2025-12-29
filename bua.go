@@ -108,6 +108,18 @@ type Result struct {
 
 	// ScreenshotPaths contains paths to screenshots taken during execution.
 	ScreenshotPaths []string
+
+	// Confidence contains task-level confidence metrics.
+	Confidence *TaskConfidence
+}
+
+// TaskConfidence contains confidence metrics for task execution.
+type TaskConfidence struct {
+	AverageConfidence float64
+	MinConfidence     float64
+	SuccessRate       float64
+	TotalSteps        int
+	FailedSteps       int
 }
 
 // Step represents a single step in the task execution.
@@ -332,8 +344,30 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 	var lastResponse string
 	var doneSummary string
 	pendingSteps := make(map[string]Step) // Track pending function calls until we see their response
+	var doneToolCalled bool
+	var humanTakeoverRequested bool
 	for event, err := range r.Run(ctx, userID, sessionID, userMessage, adkagent.RunConfig{}) {
 		if err != nil {
+			// If done tool was called successfully, ignore runner errors (e.g., "empty response")
+			if doneToolCalled && result.Success {
+				if a.config.Debug {
+					fmt.Printf("[DEBUG] Ignoring runner error after done: %v\n", err)
+				}
+				continue
+			}
+			// If human takeover was requested, set appropriate error
+			if humanTakeoverRequested {
+				result.Success = false
+				result.Error = "human takeover requested - agent could not complete task"
+				break
+			}
+			// Handle "empty response" error when agent finished without calling done
+			if err.Error() == "empty response" && len(result.Steps) > 0 {
+				// Agent did some work but didn't call done - treat as partial success
+				result.Success = false
+				result.Error = "agent did not complete task (no done() call)"
+				break
+			}
 			result.Success = false
 			result.Error = err.Error()
 			return result, nil
@@ -419,6 +453,7 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 
 							// Handle done tool specially
 							if part.FunctionCall.Name == "done" {
+								doneToolCalled = true
 								if data, exists := args["data"]; exists {
 									if dataMap, ok := data.(map[string]any); ok {
 										result.Data = dataMap
@@ -432,6 +467,17 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 								if success, exists := args["success"]; exists {
 									if successBool, ok := success.(bool); ok {
 										result.Success = successBool
+									}
+								}
+							}
+
+							// Handle human takeover request
+							if part.FunctionCall.Name == "request_human_takeover" {
+								humanTakeoverRequested = true
+								result.Success = false
+								if reason, exists := args["reason"]; exists {
+									if reasonStr, ok := reason.(string); ok {
+										doneSummary = "Human takeover requested: " + reasonStr
 									}
 								}
 							}
@@ -479,6 +525,17 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 		tokens := logger.GetTokens()
 		if tokens != nil {
 			result.TokensUsed = tokens.Used()
+		}
+	}
+
+	// Add confidence metrics from the agent
+	if taskConf := a.browserAgent.GetTaskConfidence(); taskConf != nil {
+		result.Confidence = &TaskConfidence{
+			AverageConfidence: taskConf.AverageConfidence,
+			MinConfidence:     taskConf.MinConfidence,
+			SuccessRate:       taskConf.SuccessRate,
+			TotalSteps:        taskConf.TotalSteps,
+			FailedSteps:       taskConf.FailedSteps,
 		}
 	}
 

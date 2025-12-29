@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -240,8 +241,24 @@ func (m *Manager) SearchLongTermMemory(query string, site string) []*LongTermEnt
 }
 
 func containsKeywords(text, query string) bool {
-	// Simple substring matching - could be enhanced
-	return len(text) > 0 && len(query) > 0
+	if len(text) == 0 || len(query) == 0 {
+		return false
+	}
+	// Case-insensitive substring matching with multi-word support
+	textLower := strings.ToLower(text)
+	queryLower := strings.ToLower(query)
+
+	// Check if all query words are present in the text
+	words := strings.Fields(queryLower)
+	if len(words) == 0 {
+		return false
+	}
+	for _, word := range words {
+		if !strings.Contains(textLower, word) {
+			return false
+		}
+	}
+	return true
 }
 
 // RecordSuccess records a successful action pattern.
