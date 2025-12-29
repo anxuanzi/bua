@@ -330,8 +330,8 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 	}
 
 	var lastResponse string
-	var extractedData string
 	var doneSummary string
+	pendingSteps := make(map[string]Step) // Track pending function calls until we see their response
 	for event, err := range r.Run(ctx, userID, sessionID, userMessage, adkagent.RunConfig{}) {
 		if err != nil {
 			result.Success = false
@@ -380,24 +380,79 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 						if part.Text != "" {
 							lastResponse = part.Text
 						}
-						// Capture data from the done tool call
-						if part.FunctionCall != nil && part.FunctionCall.Name == "done" {
+						// Track pending function calls
+						if part.FunctionCall != nil {
+							step := Step{
+								Action: part.FunctionCall.Name,
+							}
 							args := part.FunctionCall.Args
-							if data, exists := args["extracted_data"]; exists {
-								if dataStr, ok := data.(string); ok {
-									extractedData = dataStr
+							// Extract reasoning if available (also check "reason" as alias)
+							if reasoning, exists := args["reasoning"]; exists {
+								if reasoningStr, ok := reasoning.(string); ok {
+									step.Reasoning = reasoningStr
+								}
+							} else if reason, exists := args["reason"]; exists {
+								if reasonStr, ok := reason.(string); ok {
+									step.Reasoning = reasonStr
 								}
 							}
-							if summary, exists := args["summary"]; exists {
-								if summaryStr, ok := summary.(string); ok {
-									doneSummary = summaryStr
+							// Extract target info based on action type
+							if idx, exists := args["element_index"]; exists {
+								step.Target = fmt.Sprintf("Element #%v", idx)
+							}
+							if url, exists := args["url"]; exists {
+								if urlStr, ok := url.(string); ok {
+									step.Target = urlStr
 								}
 							}
-							if success, exists := args["success"]; exists {
-								if successBool, ok := success.(bool); ok {
-									result.Success = successBool
+							if text, exists := args["text"]; exists {
+								if textStr, ok := text.(string); ok {
+									if step.Target != "" {
+										step.Target += " → \"" + truncateString(textStr, 30) + "\""
+									} else {
+										step.Target = "\"" + truncateString(textStr, 30) + "\""
+									}
 								}
 							}
+							// Store pending step - will add when we see successful response
+							pendingSteps[part.FunctionCall.Name] = step
+
+							// Handle done tool specially
+							if part.FunctionCall.Name == "done" {
+								if data, exists := args["data"]; exists {
+									if dataMap, ok := data.(map[string]any); ok {
+										result.Data = dataMap
+									}
+								}
+								if summary, exists := args["summary"]; exists {
+									if summaryStr, ok := summary.(string); ok {
+										doneSummary = summaryStr
+									}
+								}
+								if success, exists := args["success"]; exists {
+									if successBool, ok := success.(bool); ok {
+										result.Success = successBool
+									}
+								}
+							}
+						}
+						// Track steps from successful function responses
+						if part.FunctionResponse != nil {
+							funcName := part.FunctionResponse.Name
+							respMap := part.FunctionResponse.Response
+							// Check if response indicates success
+							if success, exists := respMap["success"]; exists {
+								if successBool, ok := success.(bool); ok && successBool {
+									// Add the pending step if it exists and not done/get_page_state
+									if step, exists := pendingSteps[funcName]; exists {
+										if funcName != "done" && funcName != "get_page_state" {
+											result.Steps = append(result.Steps, step)
+										}
+									}
+								}
+							}
+							// Clean up pending step
+							delete(pendingSteps, funcName)
 						}
 					}
 				}
@@ -405,20 +460,18 @@ func (a *Agent) Run(ctx context.Context, prompt string) (*Result, error) {
 		}
 	}
 
-	// Build result data
-	if extractedData != "" {
-		// Try to parse extracted_data as JSON
-		var parsed any
-		if err := json.Unmarshal([]byte(extractedData), &parsed); err == nil {
-			result.Data = map[string]any{"extracted_data": parsed, "summary": doneSummary}
-		} else {
-			result.Data = map[string]any{"extracted_data": extractedData, "summary": doneSummary}
-		}
-	} else if lastResponse != "" {
-		result.Data = map[string]any{"response": lastResponse}
-	} else if doneSummary != "" {
-		result.Data = map[string]any{"summary": doneSummary}
+	// Build result data - add summary if we have it
+	dataMap, ok := result.Data.(map[string]any)
+	if !ok || dataMap == nil {
+		dataMap = make(map[string]any)
 	}
+	if doneSummary != "" {
+		dataMap["summary"] = doneSummary
+	}
+	if lastResponse != "" && len(dataMap) == 0 {
+		dataMap["response"] = lastResponse
+	}
+	result.Data = dataMap
 
 	// Add stats to result
 	if logger != nil {

@@ -29,9 +29,9 @@ Use BOTH together - the screenshot shows layout and visual context, the element 
 - **scroll(direction, amount, element_id)**: Scroll page or specific container
 - **navigate(url)**: Go to a URL
 - **wait(reason)**: Wait for page to stabilize
-- **extract(element_index, fields)**: Extract data from element or page
+- **get_page_state()**: Get current page URL, title, and element map
 - **request_human_takeover(reason)**: Request human help for login, CAPTCHA, 2FA
-- **done(success, summary, data)**: Complete task with results
+- **done(success, summary, data)**: Complete task with structured results
 
 ## Autonomous Planning
 
@@ -84,8 +84,11 @@ When asked to scrape/extract data:
 2. **Identify** the data container (list, grid, feed)
 3. **Check** if content is in a modal → use element_id scrolling
 4. **Scroll** to load all content (repeat scroll + wait until no new items)
-5. **Extract** the data you find
-6. **Return** results via done(success=true, data={...})
+5. **Analyze** the element map you already have - it contains all visible text, links, and element data
+6. **Build** your structured data by reading the element map (you don't need a separate extract tool)
+7. **Return** results via done(success=true, data=YOUR_STRUCTURED_DATA)
+
+**Important**: You can see ALL the data in the element map. Parse it directly to build your response - each element shows [index], tag, text, href, etc. Structure this into the format requested.
 
 ## Key Behaviors
 

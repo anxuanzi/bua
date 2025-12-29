@@ -389,64 +389,6 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 	}
 	tools = append(tools, waitTool)
 
-	// Extract tool
-	extractHandler := func(ctx tool.Context, input ExtractInput) (ExtractOutput, error) {
-		if a.browser == nil {
-			return ExtractOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		a.logger.Extract(input.WhatToExtract)
-
-		data := make(map[string]any)
-		if input.ElementIndex < 0 {
-			data["url"] = a.browser.GetURL()
-			data["title"] = a.browser.GetTitle()
-			elements, err := a.browser.GetElementMap(context.Background())
-			if err == nil {
-				data["element_count"] = elements.Count()
-			}
-			a.logger.ActionResult(true, "Extracted page info")
-		} else {
-			elements, err := a.browser.GetElementMap(context.Background())
-			if err != nil {
-				a.logger.ActionResult(false, err.Error())
-				return ExtractOutput{Success: false, Message: err.Error()}, nil
-			}
-			el, ok := elements.ByIndex(input.ElementIndex)
-			if !ok {
-				msg := fmt.Sprintf("Element %d not found", input.ElementIndex)
-				a.logger.ActionResult(false, msg)
-				return ExtractOutput{Success: false, Message: msg}, nil
-			}
-			data["tag"] = el.TagName
-			data["text"] = el.Text
-			if el.Href != "" {
-				data["href"] = el.Href
-			}
-			if el.Value != "" {
-				data["value"] = el.Value
-			}
-			a.logger.ActionResult(true, fmt.Sprintf("Extracted from element %d", input.ElementIndex))
-		}
-
-		return ExtractOutput{
-			Success: true,
-			Message: "Data extracted successfully",
-			Data:    data,
-		}, nil
-	}
-	extractTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "extract",
-			Description: "Extract data from an element or the page. Use element_index=-1 to extract general page information.",
-		},
-		extractHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create extract tool: %w", err)
-	}
-	tools = append(tools, extractTool)
-
 	// Get page state tool
 	getPageStateHandler := func(ctx tool.Context, input GetPageStateInput) (GetPageStateOutput, error) {
 		if a.browser == nil {
@@ -462,6 +404,7 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 
 		elements, err := a.browser.GetElementMap(bgCtx)
 		if err != nil {
+			output.Success = false
 			output.Error = fmt.Sprintf("Failed to get element map: %v", err)
 			a.logger.Error("get_page_state", err)
 			return output, nil
@@ -898,17 +841,6 @@ type WaitOutput struct {
 	Message string `json:"message"`
 }
 
-type ExtractInput struct {
-	ElementIndex  int    `json:"element_index" jsonschema:"The index of the element to extract from (-1 for entire page)"`
-	WhatToExtract string `json:"what_to_extract" jsonschema:"Description of what data to extract"`
-}
-
-type ExtractOutput struct {
-	Success bool           `json:"success"`
-	Message string         `json:"message"`
-	Data    map[string]any `json:"data,omitempty"`
-}
-
 type GetPageStateInput struct {
 	IncludeScreenshot bool `json:"include_screenshot" jsonschema:"Whether to include the annotated screenshot (default true)"`
 }
@@ -1008,9 +940,9 @@ type HumanTakeoverOutput struct {
 }
 
 type DoneInput struct {
-	Success       bool   `json:"success" jsonschema:"Whether the task was completed successfully"`
-	Summary       string `json:"summary" jsonschema:"Summary of what was accomplished"`
-	ExtractedData string `json:"extracted_data,omitempty" jsonschema:"Any data that was extracted during the task (as JSON)"`
+	Success bool           `json:"success" jsonschema:"Whether the task was completed successfully"`
+	Summary string         `json:"summary" jsonschema:"Summary of what was accomplished"`
+	Data    map[string]any `json:"data,omitempty" jsonschema:"Any data that was extracted during the task"`
 }
 
 type DoneOutput struct {
