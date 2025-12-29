@@ -116,17 +116,46 @@ func (m *ElementMap) InteractiveElements() []*Element {
 }
 
 // ToTokenString converts the element map to a token-efficient string for LLM context.
+// Use ToTokenStringLimited for better token management.
 func (m *ElementMap) ToTokenString() string {
+	return m.ToTokenStringLimited(0) // 0 = no limit
+}
+
+// ToTokenStringLimited converts the element map with a maximum element count.
+// This is critical for staying within LLM context limits.
+// maxElements <= 0 means no limit.
+// Recommended: 150-200 for most LLMs to balance context and visibility.
+func (m *ElementMap) ToTokenStringLimited(maxElements int) string {
 	var sb strings.Builder
+
+	// Count visible elements for accurate header
+	visibleCount := 0
+	for _, el := range m.Elements {
+		if el.IsVisible {
+			visibleCount++
+		}
+	}
 
 	sb.WriteString(fmt.Sprintf("Page: %s\n", m.PageTitle))
 	sb.WriteString(fmt.Sprintf("URL: %s\n", m.PageURL))
-	sb.WriteString(fmt.Sprintf("Elements (%d):\n", len(m.Elements)))
 
+	if maxElements > 0 && visibleCount > maxElements {
+		sb.WriteString(fmt.Sprintf("Elements (%d of %d shown):\n", maxElements, visibleCount))
+	} else {
+		sb.WriteString(fmt.Sprintf("Elements (%d):\n", visibleCount))
+	}
+
+	count := 0
 	for _, el := range m.Elements {
 		if !el.IsVisible {
 			continue
 		}
+
+		// Check limit
+		if maxElements > 0 && count >= maxElements {
+			break
+		}
+		count++
 
 		// Format: [index] tag role "text" (type=value, href=url)
 		sb.WriteString(fmt.Sprintf("[%d] %s", el.Index, el.TagName))

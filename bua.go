@@ -74,6 +74,21 @@ type Config struct {
 	// "normal" (default): Only in get_page_state responses
 	// "smart": After each action AND in get_page_state responses (higher token usage but better awareness)
 	ScreenshotMode string
+
+	// MaxElements limits elements sent to LLM (default 150, 0 = no limit).
+	// Critical for staying within context limits - 500 elements can use 50K+ tokens.
+	// Increase this if using a model with larger context window.
+	MaxElements int
+
+	// ScreenshotMaxWidth is the max width for LLM screenshots (default 800).
+	// Smaller = fewer tokens. 800px is readable while being ~10x smaller than full size.
+	// Increase this for better visual quality on larger context models.
+	ScreenshotMaxWidth int
+
+	// ScreenshotQuality is JPEG quality for LLM screenshots (default 60, range 1-100).
+	// Lower = smaller file but more artifacts. 60 is good balance.
+	// Increase this for better image quality on larger context models.
+	ScreenshotQuality int
 }
 
 // Viewport defines browser viewport dimensions.
@@ -92,6 +107,83 @@ var (
 	TabletViewport = &Viewport{Width: 768, Height: 1024}
 	// MobileViewport for mobile simulation
 	MobileViewport = &Viewport{Width: 375, Height: 812}
+)
+
+// TokenPreset defines token management settings for different use cases.
+type TokenPreset struct {
+	// MaxElements limits interactive elements sent to LLM.
+	MaxElements int
+	// ScreenshotMaxWidth is the max width for LLM screenshots.
+	ScreenshotMaxWidth int
+	// ScreenshotQuality is JPEG quality (1-100).
+	ScreenshotQuality int
+}
+
+// Token management presets for different use cases.
+// All Gemini 2.x/3.x models have 1M token context, so presets are based on
+// use case rather than model size.
+var (
+	// TokenPresetEfficient minimizes token usage for cost savings.
+	// Best for: Simple tasks, high-volume automation, cost-sensitive use cases.
+	// ~15-25K tokens per page state.
+	TokenPresetEfficient = &TokenPreset{
+		MaxElements:        100,
+		ScreenshotMaxWidth: 640,
+		ScreenshotQuality:  50,
+	}
+
+	// TokenPresetBalanced is the default balance between quality and token usage.
+	// Best for: Most automation tasks, general web browsing.
+	// ~25-40K tokens per page state.
+	TokenPresetBalanced = &TokenPreset{
+		MaxElements:        150,
+		ScreenshotMaxWidth: 800,
+		ScreenshotQuality:  60,
+	}
+
+	// TokenPresetQuality provides higher quality for complex visual tasks.
+	// Best for: Complex UIs, data-heavy pages, visual verification tasks.
+	// ~40-60K tokens per page state.
+	TokenPresetQuality = &TokenPreset{
+		MaxElements:        250,
+		ScreenshotMaxWidth: 1024,
+		ScreenshotQuality:  75,
+	}
+
+	// TokenPresetMaximum provides full quality when token budget is not a concern.
+	// Best for: Debugging, complex multi-step tasks, maximum accuracy needed.
+	// ~60-100K tokens per page state.
+	TokenPresetMaximum = &TokenPreset{
+		MaxElements:        400,
+		ScreenshotMaxWidth: 1280,
+		ScreenshotQuality:  85,
+	}
+)
+
+// ApplyTokenPreset applies a token preset to the config.
+func (c *Config) ApplyTokenPreset(preset *TokenPreset) {
+	if preset == nil {
+		return
+	}
+	c.MaxElements = preset.MaxElements
+	c.ScreenshotMaxWidth = preset.ScreenshotMaxWidth
+	c.ScreenshotQuality = preset.ScreenshotQuality
+}
+
+// Gemini model constants for convenience.
+const (
+	// ModelGemini3Pro is the latest Gemini 3 Pro model (1M context).
+	ModelGemini3Pro = "gemini-3-pro-preview"
+	// ModelGemini3Flash is the latest Gemini 3 Flash model (1M context, faster).
+	ModelGemini3Flash = "gemini-3-flash-preview"
+	// ModelGemini25Pro is Gemini 2.5 Pro (1M context, stable).
+	ModelGemini25Pro = "gemini-2.5-pro"
+	// ModelGemini25Flash is Gemini 2.5 Flash (1M context, fast & efficient).
+	ModelGemini25Flash = "gemini-2.5-flash"
+	// ModelGemini25FlashLite is Gemini 2.5 Flash Lite (1M context, most efficient).
+	ModelGemini25FlashLite = "gemini-2.5-flash-lite"
+	// ModelGemini20Flash is Gemini 2.0 Flash (1M context).
+	ModelGemini20Flash = "gemini-2.0-flash"
 )
 
 // Result represents the result of a task execution.
@@ -267,14 +359,17 @@ func (a *Agent) Start(ctx context.Context) error {
 	}
 
 	a.browserAgent = agent.New(agent.Config{
-		APIKey:          a.config.APIKey,
-		Model:           a.config.Model,
-		MaxIterations:   50,
-		MaxTokens:       a.config.MaxTokens,
-		Debug:           a.config.Debug,
-		ShowAnnotations: a.config.ShowAnnotations,
-		ScreenshotDir:   screenshotDir,
-		ScreenshotMode:  screenshotMode,
+		APIKey:             a.config.APIKey,
+		Model:              a.config.Model,
+		MaxIterations:      50,
+		MaxTokens:          a.config.MaxTokens,
+		Debug:              a.config.Debug,
+		ShowAnnotations:    a.config.ShowAnnotations,
+		ScreenshotDir:      screenshotDir,
+		ScreenshotMode:     screenshotMode,
+		MaxElements:        a.config.MaxElements,
+		ScreenshotMaxWidth: a.config.ScreenshotMaxWidth,
+		ScreenshotQuality:  a.config.ScreenshotQuality,
 	}, a.browser)
 
 	if err := a.browserAgent.Init(ctx); err != nil {

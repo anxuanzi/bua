@@ -38,19 +38,23 @@ func main() {
 	// Create agent configuration
 	// NOTE: This example is token-intensive. If you hit rate limits (429 errors),
 	// the agent will automatically retry after the suggested delay.
-	// To reduce token usage:
-	//   - Set ShowAnnotations: false (disables screenshots saved to disk)
-	//   - Use smaller viewport
-	//   - Add delays between tasks
+	//
+	// Token presets available:
+	//   bua.TokenPresetEfficient - Minimize tokens (~15-25K/page)
+	//   bua.TokenPresetBalanced  - Default balance (~25-40K/page)
+	//   bua.TokenPresetQuality   - Higher quality (~40-60K/page)
+	//   bua.TokenPresetMaximum   - Full quality (~60-100K/page)
 	cfg := bua.Config{
 		APIKey:          apiKey,
-		Model:           "gemini-3-pro-preview",
+		Model:           bua.ModelGemini25Flash, // All models have 1M context
 		ProfileName:     "research",
 		Headless:        false, // Show browser for debugging
 		Viewport:        bua.DesktopViewport,
 		Debug:           true,
 		ShowAnnotations: true, // Set to false to reduce token usage
 	}
+	// Apply token preset - use Quality for complex research tasks
+	cfg.ApplyTokenPreset(bua.TokenPresetQuality)
 
 	// Create the agent
 	agent, err := bua.New(cfg)

@@ -50,6 +50,18 @@ type Config struct {
 	// "smart": After each action + in get_page_state responses
 	ScreenshotMode string
 
+	// MaxElements limits elements sent to LLM (default 150, 0 = no limit).
+	// Critical for staying within context limits - 500 elements can use 50K+ tokens.
+	MaxElements int
+
+	// ScreenshotMaxWidth is the max width for LLM screenshots (default 800).
+	// Smaller = fewer tokens. 800px is readable while being ~10x smaller than full size.
+	ScreenshotMaxWidth int
+
+	// ScreenshotQuality is JPEG quality for LLM screenshots (default 60, range 1-100).
+	// Lower = smaller file but more artifacts. 60 is good balance.
+	ScreenshotQuality int
+
 	// Verification configures action verification behavior.
 	Verification *VerificationConfig
 }
@@ -217,8 +229,8 @@ func (a *BrowserAgent) saveScreenshotToFile(data []byte, filename string) {
 	a.logger.Screenshot(path, true)
 }
 
-// captureScreenshotForResponse captures a screenshot for tool response in smart mode.
-// Returns base64-encoded PNG if smart mode is enabled, empty string otherwise.
+// captureScreenshotForResponse captures a compressed screenshot for tool response in smart mode.
+// Returns base64-encoded JPEG if smart mode is enabled, empty string otherwise.
 func (a *BrowserAgent) captureScreenshotForResponse() string {
 	if a.config.ScreenshotMode != "smart" {
 		return ""
@@ -240,8 +252,16 @@ func (a *BrowserAgent) captureScreenshotForResponse() string {
 		}
 	}
 
-	// Take screenshot
-	screenshotData, err := a.browser.Screenshot(bgCtx)
+	// Take compressed screenshot for LLM efficiency
+	maxWidth := a.config.ScreenshotMaxWidth
+	if maxWidth <= 0 {
+		maxWidth = 800
+	}
+	quality := a.config.ScreenshotQuality
+	if quality <= 0 {
+		quality = 60
+	}
+	screenshotData, err := a.browser.ScreenshotForLLM(bgCtx, maxWidth, quality)
 	if err != nil {
 		a.logger.Error("captureScreenshotForResponse/Screenshot", err)
 		return ""
@@ -629,7 +649,13 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 			return output, nil
 		}
 
-		output.ElementMap = elements.ToTokenString()
+		// Use limited element count to stay within token budget
+		// Default to 150 elements if not configured (balances visibility vs tokens)
+		maxElements := a.config.MaxElements
+		if maxElements <= 0 {
+			maxElements = 150
+		}
+		output.ElementMap = elements.ToTokenStringLimited(maxElements)
 		a.logger.PageState(output.URL, output.Title, elements.Count())
 
 		// Capture screenshot if not excluded
@@ -641,8 +667,17 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 				}
 			}
 
-			// Take screenshot
-			screenshotData, err := a.browser.Screenshot(bgCtx)
+			// Take compressed screenshot optimized for LLM context
+			// Default: 800px wide, JPEG quality 60 (~30-50KB vs 500KB+ original)
+			maxWidth := a.config.ScreenshotMaxWidth
+			if maxWidth <= 0 {
+				maxWidth = 800
+			}
+			quality := a.config.ScreenshotQuality
+			if quality <= 0 {
+				quality = 60
+			}
+			screenshotData, err := a.browser.ScreenshotForLLM(bgCtx, maxWidth, quality)
 			if err != nil {
 				a.logger.Error("get_page_state/Screenshot", err)
 			} else {

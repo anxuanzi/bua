@@ -28,13 +28,16 @@ func main() {
 	// Create agent configuration with all features enabled
 	cfg := bua.Config{
 		APIKey:          apiKey,
-		Model:           "gemini-3-flash-preview", // Latest model with 1M input, 65K output
+		Model:           bua.ModelGemini3Flash, // Use model constants for convenience
 		ProfileName:     "simple",
 		Headless:        false, // Show browser for debugging
 		Viewport:        bua.DesktopViewport,
 		Debug:           true, // Enable debug logging
 		ShowAnnotations: true, // Show element annotations
 	}
+	// Optional: Apply token preset (default is Balanced)
+	// cfg.ApplyTokenPreset(bua.TokenPresetEfficient) // For cost savings
+	// cfg.ApplyTokenPreset(bua.TokenPresetQuality)   // For complex tasks
 
 	// Create the agent
 	agent, err := bua.New(cfg)

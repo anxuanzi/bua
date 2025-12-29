@@ -2,13 +2,18 @@
 package browser
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"sync"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/google/uuid"
+	"golang.org/x/image/draw"
 
 	"github.com/anxuanzi/bua-go/dom"
 	"github.com/anxuanzi/bua-go/screenshot"
@@ -200,6 +205,70 @@ func (b *Browser) SaveScreenshot(ctx context.Context, data []byte, name string) 
 	}
 
 	return b.screener.Save(data, name)
+}
+
+// ScreenshotForLLM takes a compressed screenshot optimized for LLM context.
+// It resizes to maxWidth and uses JPEG compression to minimize token usage.
+// A 1280x800 PNG (~500KB) becomes a 640x400 JPEG (~30-50KB) - 10-15x smaller.
+func (b *Browser) ScreenshotForLLM(ctx context.Context, maxWidth int, quality int) ([]byte, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	page := b.getActivePageLocked()
+	if page == nil {
+		return nil, fmt.Errorf("no active page")
+	}
+
+	// Default values for LLM optimization
+	if maxWidth <= 0 {
+		maxWidth = 800 // Reduced from 1280 - still readable, much smaller
+	}
+	if quality <= 0 {
+		quality = 60 // JPEG quality 60 is good balance of size/quality
+	}
+
+	// Take viewport screenshot
+	data, err := page.Screenshot(false, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to take screenshot: %w", err)
+	}
+
+	// Decode PNG
+	img, err := png.Decode(bytes.NewReader(data))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode screenshot: %w", err)
+	}
+
+	// Calculate new dimensions maintaining aspect ratio
+	bounds := img.Bounds()
+	origWidth := bounds.Dx()
+	origHeight := bounds.Dy()
+
+	if origWidth <= maxWidth {
+		// Image is already small enough, just convert to JPEG
+		return compressToJPEG(img, quality)
+	}
+
+	// Calculate new height maintaining aspect ratio
+	newWidth := maxWidth
+	newHeight := (origHeight * maxWidth) / origWidth
+
+	// Resize image
+	resized := image.NewRGBA(image.Rect(0, 0, newWidth, newHeight))
+	draw.BiLinear.Scale(resized, resized.Bounds(), img, bounds, draw.Over, nil)
+
+	// Compress to JPEG
+	return compressToJPEG(resized, quality)
+}
+
+// compressToJPEG converts an image to JPEG with specified quality.
+func compressToJPEG(img image.Image, quality int) ([]byte, error) {
+	var buf bytes.Buffer
+	err := jpeg.Encode(&buf, img, &jpeg.Options{Quality: quality})
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode JPEG: %w", err)
+	}
+	return buf.Bytes(), nil
 }
 
 // GetElementMap extracts the element map from the current page.
