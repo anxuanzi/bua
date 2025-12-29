@@ -66,6 +66,11 @@ type Config struct {
 	// When enabled, annotations are shown before each action for debugging.
 	// Also captures annotated screenshots for each step.
 	ShowAnnotations bool
+
+	// ScreenshotMode controls when screenshots are sent to the model.
+	// "normal" (default): Only in get_page_state responses
+	// "smart": After each action AND in get_page_state responses (higher token usage but better awareness)
+	ScreenshotMode string
 }
 
 // Viewport defines browser viewport dimensions.
@@ -253,6 +258,11 @@ func (a *Agent) Start(ctx context.Context) error {
 	}
 
 	// Create and initialize ADK browser agent
+	screenshotMode := a.config.ScreenshotMode
+	if screenshotMode == "" {
+		screenshotMode = "normal" // Default to normal mode
+	}
+
 	a.browserAgent = agent.New(agent.Config{
 		APIKey:          a.config.APIKey,
 		Model:           a.config.Model,
@@ -261,6 +271,7 @@ func (a *Agent) Start(ctx context.Context) error {
 		Debug:           a.config.Debug,
 		ShowAnnotations: a.config.ShowAnnotations,
 		ScreenshotDir:   screenshotDir,
+		ScreenshotMode:  screenshotMode,
 	}, a.browser)
 
 	if err := a.browserAgent.Init(ctx); err != nil {

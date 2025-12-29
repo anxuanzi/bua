@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -43,6 +44,11 @@ type Config struct {
 
 	// ScreenshotDir is the directory to save annotated screenshots.
 	ScreenshotDir string
+
+	// ScreenshotMode controls when screenshots are sent to the model.
+	// "normal" (default): Only in get_page_state responses
+	// "smart": After each action + in get_page_state responses
+	ScreenshotMode string
 
 	// Verification configures action verification behavior.
 	Verification *VerificationConfig
@@ -165,9 +171,9 @@ func (a *BrowserAgent) preAction() {
 		a.logger.Annotation(elements.Count())
 	}
 
-	// Take annotated screenshot
+	// Take screenshot (browser overlay is already visible, no need for Go-based annotations)
 	if a.config.ScreenshotDir != "" {
-		screenshot, err := a.browser.ScreenshotWithAnnotations(bgCtx, elements)
+		screenshot, err := a.browser.Screenshot(bgCtx)
 		if err != nil {
 			a.logger.Error("preAction/Screenshot", err)
 			return
@@ -209,6 +215,46 @@ func (a *BrowserAgent) saveScreenshotToFile(data []byte, filename string) {
 		return
 	}
 	a.logger.Screenshot(path, true)
+}
+
+// captureScreenshotForResponse captures a screenshot for tool response in smart mode.
+// Returns base64-encoded PNG if smart mode is enabled, empty string otherwise.
+func (a *BrowserAgent) captureScreenshotForResponse() string {
+	if a.config.ScreenshotMode != "smart" {
+		return ""
+	}
+
+	bgCtx := context.Background()
+
+	// Get elements for annotations
+	elements, err := a.browser.GetElementMap(bgCtx)
+	if err != nil {
+		a.logger.Error("captureScreenshotForResponse/GetElementMap", err)
+		return ""
+	}
+
+	// Show annotations if enabled
+	if a.config.ShowAnnotations {
+		if err := a.browser.ShowAnnotations(bgCtx, elements, nil); err != nil {
+			a.logger.Error("captureScreenshotForResponse/ShowAnnotations", err)
+		}
+	}
+
+	// Take screenshot
+	screenshotData, err := a.browser.Screenshot(bgCtx)
+	if err != nil {
+		a.logger.Error("captureScreenshotForResponse/Screenshot", err)
+		return ""
+	}
+
+	// Hide annotations after screenshot
+	if a.config.ShowAnnotations {
+		if err := a.browser.HideAnnotations(bgCtx); err != nil {
+			a.logger.Error("captureScreenshotForResponse/HideAnnotations", err)
+		}
+	}
+
+	return base64.StdEncoding.EncodeToString(screenshotData)
 }
 
 // createBrowserTools creates the function tools for browser automation.
@@ -284,14 +330,14 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 				if verification.Verified {
 					msg := fmt.Sprintf("Clicked element %d (verified: %s, confidence: %.2f)", input.ElementIndex, verification.VerificationMsg, actionConf.OverallScore.Value)
 					a.logger.ActionResult(true, msg)
-					return ClickOutput{Success: true, Message: msg, Verified: true}, nil
+					return ClickOutput{Success: true, Message: msg, Verified: true, Screenshot: a.captureScreenshotForResponse()}, nil
 				}
 
 				// Not verified - retry if allowed
 				if !a.verifier.ShouldRetry(verification) {
 					msg := fmt.Sprintf("Clicked element %d (unverified: %s, confidence: %.2f)", input.ElementIndex, verification.VerificationMsg, actionConf.OverallScore.Value)
 					a.logger.ActionResult(true, msg)
-					return ClickOutput{Success: true, Message: msg, Verified: false}, nil
+					return ClickOutput{Success: true, Message: msg, Verified: false, Screenshot: a.captureScreenshotForResponse()}, nil
 				}
 			} else {
 				// No verification - record action with default confidence
@@ -300,7 +346,7 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 
 				msg := fmt.Sprintf("Clicked element %d (confidence: %.2f)", input.ElementIndex, actionConf.OverallScore.Value)
 				a.logger.ActionResult(true, msg)
-				return ClickOutput{Success: true, Message: msg}, nil
+				return ClickOutput{Success: true, Message: msg, Screenshot: a.captureScreenshotForResponse()}, nil
 			}
 		}
 
@@ -392,14 +438,14 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 				if verification.Verified {
 					msg := fmt.Sprintf("Typed '%s' into element %d (verified: %s, confidence: %.2f)", input.Text, input.ElementIndex, verification.VerificationMsg, actionConf.OverallScore.Value)
 					a.logger.ActionResult(true, msg)
-					return TypeOutput{Success: true, Message: msg, Verified: true}, nil
+					return TypeOutput{Success: true, Message: msg, Verified: true, Screenshot: a.captureScreenshotForResponse()}, nil
 				}
 
 				// Not verified - retry if allowed
 				if !a.verifier.ShouldRetry(verification) {
 					msg := fmt.Sprintf("Typed '%s' into element %d (unverified: %s, confidence: %.2f)", input.Text, input.ElementIndex, verification.VerificationMsg, actionConf.OverallScore.Value)
 					a.logger.ActionResult(true, msg)
-					return TypeOutput{Success: true, Message: msg, Verified: false}, nil
+					return TypeOutput{Success: true, Message: msg, Verified: false, Screenshot: a.captureScreenshotForResponse()}, nil
 				}
 			} else {
 				// No verification - record action with default confidence
@@ -408,7 +454,7 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 
 				msg := fmt.Sprintf("Typed '%s' into element %d (confidence: %.2f)", input.Text, input.ElementIndex, actionConf.OverallScore.Value)
 				a.logger.ActionResult(true, msg)
-				return TypeOutput{Success: true, Message: msg}, nil
+				return TypeOutput{Success: true, Message: msg, Screenshot: a.captureScreenshotForResponse()}, nil
 			}
 		}
 
@@ -476,7 +522,7 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 		}
 
 		a.logger.ActionResult(true, msg)
-		return ScrollOutput{Success: true, Message: msg}, nil
+		return ScrollOutput{Success: true, Message: msg, Screenshot: a.captureScreenshotForResponse()}, nil
 	}
 	scrollTool, err := functiontool.New(
 		functiontool.Config{
@@ -512,10 +558,11 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 		a.logger.ActionResult(true, fmt.Sprintf("Loaded: %s", title))
 
 		return NavigateOutput{
-			Success: true,
-			Message: fmt.Sprintf("Navigated to %s", input.URL),
-			URL:     url,
-			Title:   title,
+			Success:    true,
+			Message:    fmt.Sprintf("Navigated to %s", input.URL),
+			URL:        url,
+			Title:      title,
+			Screenshot: a.captureScreenshotForResponse(),
 		}, nil
 	}
 	navigateTool, err := functiontool.New(
@@ -583,6 +630,31 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 
 		output.ElementMap = elements.ToTokenString()
 		a.logger.PageState(output.URL, output.Title, elements.Count())
+
+		// Capture screenshot if not excluded
+		if !input.ExcludeScreenshot {
+			// Show annotations if enabled (for screenshot only)
+			if a.config.ShowAnnotations {
+				if err := a.browser.ShowAnnotations(bgCtx, elements, nil); err != nil {
+					a.logger.Error("get_page_state/ShowAnnotations", err)
+				}
+			}
+
+			// Take screenshot
+			screenshotData, err := a.browser.Screenshot(bgCtx)
+			if err != nil {
+				a.logger.Error("get_page_state/Screenshot", err)
+			} else {
+				output.Screenshot = base64.StdEncoding.EncodeToString(screenshotData)
+			}
+
+			// Hide annotations after screenshot
+			if a.config.ShowAnnotations {
+				if err := a.browser.HideAnnotations(bgCtx); err != nil {
+					a.logger.Error("get_page_state/HideAnnotations", err)
+				}
+			}
+		}
 
 		return output, nil
 	}
@@ -1071,9 +1143,10 @@ type ClickInput struct {
 }
 
 type ClickOutput struct {
-	Success  bool   `json:"success"`
-	Message  string `json:"message"`
-	Verified bool   `json:"verified,omitempty"` // Action was verified to have intended effect
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	Verified   bool   `json:"verified,omitempty"`   // Action was verified to have intended effect
+	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
 }
 
 type TypeInput struct {
@@ -1083,9 +1156,10 @@ type TypeInput struct {
 }
 
 type TypeOutput struct {
-	Success  bool   `json:"success"`
-	Message  string `json:"message"`
-	Verified bool   `json:"verified,omitempty"` // Action was verified to have intended effect
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	Verified   bool   `json:"verified,omitempty"`   // Action was verified to have intended effect
+	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
 }
 
 type ScrollInput struct {
@@ -1096,8 +1170,9 @@ type ScrollInput struct {
 }
 
 type ScrollOutput struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
 }
 
 type NavigateInput struct {
@@ -1106,10 +1181,11 @@ type NavigateInput struct {
 }
 
 type NavigateOutput struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	URL     string `json:"url,omitempty"`
-	Title   string `json:"title,omitempty"`
+	Success    bool   `json:"success"`
+	Message    string `json:"message"`
+	URL        string `json:"url,omitempty"`
+	Title      string `json:"title,omitempty"`
+	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
 }
 
 type WaitInput struct {
@@ -1122,7 +1198,7 @@ type WaitOutput struct {
 }
 
 type GetPageStateInput struct {
-	IncludeScreenshot bool `json:"include_screenshot" jsonschema:"Whether to include the annotated screenshot (default true)"`
+	ExcludeScreenshot bool `json:"exclude_screenshot" jsonschema:"Set to true to skip screenshot capture (default false = include screenshot)"`
 }
 
 type GetPageStateOutput struct {

@@ -155,7 +155,9 @@ func (b *Browser) Screenshot(ctx context.Context) ([]byte, error) {
 		return nil, fmt.Errorf("no active page")
 	}
 
-	data, err := page.Screenshot(true, nil)
+	// Use viewport screenshot (false) instead of full-page (true) to avoid
+	// fixed overlay elements being captured multiple times during page stitching
+	data, err := page.Screenshot(false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to take screenshot: %w", err)
 	}
@@ -173,8 +175,8 @@ func (b *Browser) ScreenshotWithAnnotations(ctx context.Context, elements *dom.E
 		return nil, fmt.Errorf("no active page")
 	}
 
-	// Take raw screenshot
-	data, err := page.Screenshot(true, nil)
+	// Take viewport screenshot (false) - full-page (true) causes fixed overlays to repeat
+	data, err := page.Screenshot(false, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to take screenshot: %w", err)
 	}

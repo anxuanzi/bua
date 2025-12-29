@@ -3,6 +3,7 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 
 	"github.com/anxuanzi/bua-go/dom"
@@ -115,57 +116,20 @@ func getElementTypeClass(tagName string, el *dom.Element) string {
 	}
 }
 
-// ShowAnnotations draws annotation overlays on all detected elements.
-func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap, cfg *AnnotationConfig) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+// elementAnnotation holds data for a single element annotation (used for batched JS).
+type elementAnnotation struct {
+	TypeClass string  `json:"t"`
+	X         float64 `json:"x"`
+	Y         float64 `json:"y"`
+	W         float64 `json:"w"`
+	H         float64 `json:"h"`
+	Label     string  `json:"l"`
+}
 
-	page := b.getActivePageLocked()
-	if page == nil {
-		return fmt.Errorf("no active page")
-	}
-
-	if cfg == nil {
-		cfg = DefaultAnnotationConfig()
-	}
-
-	// First, clear any existing annotations
-	_, err := page.Eval(`() => {
-		const existing = document.getElementById('bua-annotation-container');
-		if (existing) existing.remove();
-	}`)
-	if err != nil {
-		return fmt.Errorf("failed to clear existing annotations: %w", err)
-	}
-
-	// Inject CSS
-	css := annotationCSS(cfg.Opacity)
-	_, err = page.Eval(fmt.Sprintf(`() => {
-		let style = document.getElementById('bua-annotation-style');
-		if (!style) {
-			style = document.createElement('style');
-			style.id = 'bua-annotation-style';
-			document.head.appendChild(style);
-		}
-		style.textContent = %q;
-	}`, css))
-	if err != nil {
-		return fmt.Errorf("failed to inject CSS: %w", err)
-	}
-
-	// Create overlay container
-	_, err = page.Eval(`() => {
-		const container = document.createElement('div');
-		container.id = 'bua-annotation-container';
-		container.className = 'bua-annotation-overlay';
-		document.body.appendChild(container);
-	}`)
-	if err != nil {
-		return fmt.Errorf("failed to create overlay container: %w", err)
-	}
-
-	// Add element boxes
-	for _, el := range elements.InteractiveElements() {
+// buildElementAnnotations creates annotation data for all elements.
+func buildElementAnnotations(elements []*dom.Element, cfg *AnnotationConfig) []elementAnnotation {
+	var annotations []elementAnnotation
+	for _, el := range elements {
 		if el.BoundingBox.Width <= 0 || el.BoundingBox.Height <= 0 {
 			continue
 		}
@@ -183,39 +147,94 @@ func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap,
 			labelText += el.TagName
 		}
 
-		js := fmt.Sprintf(`() => {
-			const container = document.getElementById('bua-annotation-container');
-			if (!container) return;
+		annotations = append(annotations, elementAnnotation{
+			TypeClass: typeClass,
+			X:         el.BoundingBox.X,
+			Y:         el.BoundingBox.Y,
+			W:         el.BoundingBox.Width,
+			H:         el.BoundingBox.Height,
+			Label:     labelText,
+		})
+	}
+	return annotations
+}
 
+// ShowAnnotations draws annotation overlays on all detected elements.
+// Uses batched JavaScript for performance (single CDP call instead of O(n) calls).
+func (b *Browser) ShowAnnotations(ctx context.Context, elements *dom.ElementMap, cfg *AnnotationConfig) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	page := b.getActivePageLocked()
+	if page == nil {
+		return fmt.Errorf("no active page")
+	}
+
+	if cfg == nil {
+		cfg = DefaultAnnotationConfig()
+	}
+
+	// Build annotation data for all elements
+	annotations := buildElementAnnotations(elements.InteractiveElements(), cfg)
+
+	// Marshal to JSON for passing to JavaScript
+	annotationsJSON, err := json.Marshal(annotations)
+	if err != nil {
+		return fmt.Errorf("failed to marshal annotations: %w", err)
+	}
+
+	css := annotationCSS(cfg.Opacity)
+
+	// Single batched JavaScript call that:
+	// 1. Clears existing annotations
+	// 2. Injects CSS
+	// 3. Creates container
+	// 4. Adds all element boxes in one go
+	batchedJS := fmt.Sprintf(`(annotationsData) => {
+		// Clear existing annotations
+		const existing = document.getElementById('bua-annotation-container');
+		if (existing) existing.remove();
+
+		// Inject or update CSS
+		let style = document.getElementById('bua-annotation-style');
+		if (!style) {
+			style = document.createElement('style');
+			style.id = 'bua-annotation-style';
+			document.head.appendChild(style);
+		}
+		style.textContent = %q;
+
+		// Create overlay container
+		const container = document.createElement('div');
+		container.id = 'bua-annotation-container';
+		container.className = 'bua-annotation-overlay';
+
+		// Add all element boxes in a single loop (no DOM access per iteration)
+		const fragment = document.createDocumentFragment();
+		for (const el of annotationsData) {
 			const box = document.createElement('div');
-			box.className = 'bua-element-box %s';
-			box.style.left = '%fpx';
-			box.style.top = '%fpx';
-			box.style.width = '%fpx';
-			box.style.height = '%fpx';
+			box.className = 'bua-element-box ' + el.t;
+			box.style.cssText = 'left:' + el.x + 'px;top:' + el.y + 'px;width:' + el.w + 'px;height:' + el.h + 'px';
 
 			const label = document.createElement('div');
 			label.className = 'bua-element-label';
-			label.textContent = '%s';
-			label.style.left = '0';
-			label.style.top = '-18px';
+			label.textContent = el.l;
+			label.style.cssText = 'left:0;top:-18px';
 
 			box.appendChild(label);
-			container.appendChild(box);
-		}`,
-			typeClass,
-			el.BoundingBox.X,
-			el.BoundingBox.Y,
-			el.BoundingBox.Width,
-			el.BoundingBox.Height,
-			labelText,
-		)
-
-		_, err = page.Eval(js)
-		if err != nil {
-			// Continue with other elements even if one fails
-			continue
+			fragment.appendChild(box);
 		}
+
+		container.appendChild(fragment);
+		document.body.appendChild(container);
+
+		// Wait for browser paint to complete (prevents white background in screenshots)
+		return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
+	}`, css)
+
+	_, err = page.Eval(batchedJS, annotationsJSON)
+	if err != nil {
+		return fmt.Errorf("failed to create annotations: %w", err)
 	}
 
 	return nil
