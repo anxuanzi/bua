@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"sync"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/proto"
@@ -70,6 +71,30 @@ func New(rodBrowser *rod.Browser, cfg Config) *Browser {
 	return b
 }
 
+// waitForStableWithTimeout waits for the page to stabilize with an overall timeout.
+// This prevents indefinite blocking on pages with continuous animations/video (e.g., Instagram Reels).
+// stabilityDuration: how long the page must be stable (no DOM changes) to be considered "ready"
+// maxWait: maximum total time to wait for stability before giving up
+func waitForStableWithTimeout(page *rod.Page, stabilityDuration, maxWait time.Duration) {
+	if page == nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// WaitStable waits until page hasn't changed for stabilityDuration
+		_ = page.WaitStable(stabilityDuration)
+	}()
+
+	select {
+	case <-done:
+		// Page became stable within timeout
+	case <-time.After(maxWait):
+		// Timeout reached - page may still be loading/animating but we continue anyway
+	}
+}
+
 // Navigate navigates to the specified URL.
 // If no tab exists, creates a new one.
 func (b *Browser) Navigate(ctx context.Context, url string) error {
@@ -99,8 +124,9 @@ func (b *Browser) Navigate(ctx context.Context, url string) error {
 		return fmt.Errorf("failed to wait for page load: %w", err)
 	}
 
-	// Wait for page to stabilize (animations, lazy loading, etc.)
-	page.MustWaitStable()
+	// Wait for page to stabilize with timeout to avoid blocking on animated/video pages
+	// Use 300ms stability requirement, max 5 seconds total wait
+	waitForStableWithTimeout(page, 300*time.Millisecond, 5*time.Second)
 
 	return nil
 }
@@ -435,7 +461,8 @@ func (b *Browser) TypeInElement(ctx context.Context, elementIndex int, text stri
 	page := b.getActivePageLocked()
 	b.mu.RUnlock()
 	if page != nil {
-		page.MustWaitStable()
+		// Wait for stability after click, but don't block on animated pages
+		waitForStableWithTimeout(page, 200*time.Millisecond, 2*time.Second)
 	}
 
 	// Type the text
@@ -657,7 +684,8 @@ func (b *Browser) NewTab(ctx context.Context, url string) (string, error) {
 	if err := page.WaitLoad(); err != nil {
 		return tabID, fmt.Errorf("page load failed: %w", err)
 	}
-	page.MustWaitStable()
+	// Wait for stability with timeout to avoid blocking on animated/video pages
+	waitForStableWithTimeout(page, 300*time.Millisecond, 5*time.Second)
 
 	return tabID, nil
 }
