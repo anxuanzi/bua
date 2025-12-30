@@ -555,6 +555,111 @@ func (b *Browser) ScrollInElement(ctx context.Context, elementIndex int, deltaX,
 	return nil
 }
 
+// FindScrollableModal attempts to auto-detect a scrollable modal/overlay container on the page.
+// Returns the element index if found, or -1 if no modal detected.
+// This is useful as a fallback when the agent can't identify the scrollable container.
+func (b *Browser) FindScrollableModal(ctx context.Context) (int, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	page := b.getActivePageLocked()
+	if page == nil {
+		return -1, fmt.Errorf("no active page")
+	}
+
+	// JavaScript to find the most likely scrollable modal container
+	// Checks for: role=dialog, overflow scrollable, fixed/absolute positioned overlays
+	result, err := page.Eval(`(function() {
+		// Priority 1: Elements with role="dialog" that are scrollable
+		const dialogs = document.querySelectorAll('[role="dialog"]');
+		for (const el of dialogs) {
+			const style = window.getComputedStyle(el);
+			if (style.display !== 'none' && style.visibility !== 'hidden') {
+				// Check if it or a child is scrollable
+				const scrollable = el.querySelector('*');
+				if (el.scrollHeight > el.clientHeight || (scrollable && scrollable.scrollHeight > scrollable.clientHeight)) {
+					const idx = el.getAttribute('data-bua-index');
+					if (idx) return parseInt(idx);
+				}
+			}
+		}
+
+		// Priority 2: Fixed/absolute positioned elements with overflow scroll/auto
+		const candidates = [];
+		const allElements = document.querySelectorAll('[data-bua-index]');
+		for (const el of allElements) {
+			const style = window.getComputedStyle(el);
+			const position = style.position;
+			const overflow = style.overflowY;
+			const isScrollable = (overflow === 'auto' || overflow === 'scroll') && el.scrollHeight > el.clientHeight;
+			const isOverlay = position === 'fixed' || position === 'absolute';
+
+			if (isScrollable && isOverlay && style.display !== 'none') {
+				const idx = parseInt(el.getAttribute('data-bua-index'));
+				const rect = el.getBoundingClientRect();
+				// Score based on size and visibility
+				const score = rect.width * rect.height;
+				if (score > 10000) { // Minimum size threshold
+					candidates.push({idx, score});
+				}
+			}
+		}
+
+		// Priority 3: Any scrollable container with significant scroll height
+		for (const el of allElements) {
+			const style = window.getComputedStyle(el);
+			const overflow = style.overflowY;
+			const isScrollable = (overflow === 'auto' || overflow === 'scroll') && el.scrollHeight > el.clientHeight + 100;
+
+			if (isScrollable && style.display !== 'none') {
+				const idx = parseInt(el.getAttribute('data-bua-index'));
+				const rect = el.getBoundingClientRect();
+				// Must be reasonably sized and visible
+				if (rect.width > 200 && rect.height > 200 && rect.top >= 0 && rect.left >= 0) {
+					const score = (el.scrollHeight - el.clientHeight) * rect.width; // Prefer more scrollable content
+					candidates.push({idx, score: score * 0.5}); // Lower priority than overlays
+				}
+			}
+		}
+
+		// Return the highest scoring candidate
+		if (candidates.length > 0) {
+			candidates.sort((a, b) => b.score - a.score);
+			return candidates[0].idx;
+		}
+
+		return -1;
+	})()`)
+
+	if err != nil {
+		return -1, fmt.Errorf("failed to detect scrollable modal: %w", err)
+	}
+
+	// result.Value is a gjson.Result - use Int() which returns int64
+	idx := int(result.Value.Int())
+	return idx, nil
+}
+
+// ScrollInModalAuto attempts to scroll in an auto-detected modal container.
+// If no modal is found, falls back to page scroll.
+// Returns the element index used for scrolling (-1 if page scroll).
+func (b *Browser) ScrollInModalAuto(ctx context.Context, deltaX, deltaY float64) (int, error) {
+	modalIdx, err := b.FindScrollableModal(ctx)
+	if err != nil {
+		// Fall back to page scroll
+		return -1, b.Scroll(ctx, deltaX, deltaY)
+	}
+
+	if modalIdx >= 0 {
+		// Found a modal, scroll within it
+		err = b.ScrollInElement(ctx, modalIdx, deltaX, deltaY)
+		return modalIdx, err
+	}
+
+	// No modal found, scroll the page
+	return -1, b.Scroll(ctx, deltaX, deltaY)
+}
+
 // WaitForNavigation waits for a navigation to complete.
 func (b *Browser) WaitForNavigation(ctx context.Context) error {
 	b.mu.RLock()

@@ -532,12 +532,24 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 
 		var err error
 		var msg string
+		var elementScrolled int
 
 		// Check if we're scrolling within a specific element (e.g., modal, popup)
 		if input.ElementID > 0 {
+			// Explicit element ID provided
 			err = a.browser.ScrollInElement(context.Background(), input.ElementID, 0, deltaY)
+			elementScrolled = input.ElementID
 			msg = fmt.Sprintf("Scrolled %s by %d pixels within element %d", input.Direction, amount, input.ElementID)
+		} else if input.AutoDetect {
+			// Auto-detect scrollable modal/container
+			elementScrolled, err = a.browser.ScrollInModalAuto(context.Background(), 0, deltaY)
+			if elementScrolled > 0 {
+				msg = fmt.Sprintf("Auto-detected modal: Scrolled %s by %d pixels within element %d", input.Direction, amount, elementScrolled)
+			} else {
+				msg = fmt.Sprintf("No modal detected: Scrolled %s by %d pixels on the page", input.Direction, amount)
+			}
 		} else {
+			// Default: scroll the page
 			err = a.browser.Scroll(context.Background(), 0, deltaY)
 			msg = fmt.Sprintf("Scrolled %s by %d pixels", input.Direction, amount)
 		}
@@ -548,12 +560,12 @@ func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
 		}
 
 		a.logger.ActionResult(true, msg)
-		return ScrollOutput{Success: true, Message: msg, Screenshot: a.captureScreenshotForResponse()}, nil
+		return ScrollOutput{Success: true, Message: msg, ElementScrolled: elementScrolled, Screenshot: a.captureScreenshotForResponse()}, nil
 	}
 	scrollTool, err := functiontool.New(
 		functiontool.Config{
 			Name:        "scroll",
-			Description: "Scroll the page or a specific scrollable element (modal, sidebar, popup) in a direction (up or down). Use element_id to scroll within a container like Instagram's comment modal.",
+			Description: "Scroll the page or a scrollable container. After clicking a button that opened a modal/popup, use EITHER: (1) element_id if you know the scrollable container's index, OR (2) auto_detect=true to automatically find and scroll the modal. Without either option, this scrolls the main page which won't work for modal content like Instagram comments.",
 		},
 		scrollHandler,
 	)
@@ -1212,16 +1224,18 @@ type TypeOutput struct {
 }
 
 type ScrollInput struct {
-	Direction string `json:"direction" jsonschema:"Direction to scroll: up or down"`
-	Amount    int    `json:"amount" jsonschema:"Amount to scroll in pixels (default 500)"`
-	ElementID int    `json:"element_id,omitempty" jsonschema:"Optional element ID of a scrollable container (e.g., modal, sidebar). If not provided, scrolls the entire page."`
-	Reasoning string `json:"reasoning" jsonschema:"Brief explanation of why you're scrolling"`
+	Direction  string `json:"direction" jsonschema:"Direction to scroll: up or down (required)"`
+	Amount     int    `json:"amount" jsonschema:"Amount to scroll in pixels (default 500)"`
+	ElementID  int    `json:"element_id,omitempty" jsonschema:"Element ID of scrollable container (modal/popup/sidebar). If you know the container index, provide it here. If unsure, set auto_detect=true instead."`
+	AutoDetect bool   `json:"auto_detect,omitempty" jsonschema:"Set to true to auto-detect and scroll the most likely modal/scrollable container. Use this when you opened a modal but don't know which element is scrollable. Recommended after clicking buttons that open popups."`
+	Reasoning  string `json:"reasoning" jsonschema:"Why you are scrolling and whether you are scrolling page or a container"`
 }
 
 type ScrollOutput struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
+	Success         bool   `json:"success"`
+	Message         string `json:"message"`
+	ElementScrolled int    `json:"element_scrolled,omitempty"` // Which element was scrolled (-1 or 0 = page, >0 = element index)
+	Screenshot      string `json:"screenshot,omitempty"`       // Base64 PNG (only in smart mode)
 }
 
 type NavigateInput struct {

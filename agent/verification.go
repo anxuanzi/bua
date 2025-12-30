@@ -112,6 +112,13 @@ func (v *Verifier) VerifyClick(ctx context.Context, elementIndex int, pre, post 
 	if len(changes) > 0 {
 		verification.Verified = true
 		verification.VerificationMsg = fmt.Sprintf("Click verified: %s", strings.Join(changes, "; "))
+
+		// Detect if a modal/popup likely opened (many new elements appeared)
+		// This helps the agent know to use element_id or auto_detect for scrolling inside modals
+		elementDiff := post.ElementCount - pre.ElementCount
+		if elementDiff >= 20 {
+			verification.VerificationMsg += fmt.Sprintf(". MODAL DETECTED: %d new elements appeared - to scroll this content, use scroll(auto_detect=true) or scroll(element_id=<container_index>)", elementDiff)
+		}
 	} else {
 		// No changes detected - might be a problem
 		verification.Verified = false

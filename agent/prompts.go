@@ -48,11 +48,33 @@ You don't need detailed step-by-step instructions. Figure it out.
 
 ## Web Pattern Recognition
 
-### Modals & Popups (IMPORTANT)
-Many sites show content in overlay modals (dialogs, popups, sidebars). These have their OWN scroll:
-- **Detection**: Look for role="dialog", role="listbox", or overlay containers
-- **Scrolling**: Use scroll(direction, amount, element_id=<modal_index>) to scroll INSIDE the modal
-- **Common cases**: Comment sections, chat windows, dropdown menus, image galleries, settings panels
+### Modals & Popups (CRITICAL - READ CAREFULLY)
+Many sites show content in overlay modals (dialogs, popups, sidebars). These have their OWN scroll container:
+
+**Detection - Look for these in the element map:**
+- role="dialog" or role="listbox"
+- Elements that appeared AFTER clicking a button (e.g., comments button)
+- Container elements (div, section, article) that wrap the new content
+- Elements with "modal", "popup", "overlay", "sidebar" in their attributes
+
+**Instagram-Specific:**
+- Comments appear in a scrollable container AFTER clicking the comments button
+- The comment container is usually a div with multiple comment items inside
+- Look for the PARENT container of the comment list, not individual comments
+- Find the element index of the scrollable area (often has role="dialog" or is the first new container)
+
+**Scrolling Inside Modals - TWO OPTIONS:**
+When you see new content in a modal/popup after clicking:
+
+Option 1 - If you can identify the container:
+1. Find the modal container element in the element map
+2. Use: scroll(direction="down", amount=500, element_id=<container_index>)
+
+Option 2 - If you can't find the container (RECOMMENDED):
+1. Use: scroll(direction="down", amount=500, auto_detect=true)
+2. This automatically finds and scrolls the modal for you
+
+**IMPORTANT:** Without element_id or auto_detect, scroll() moves the main page, not the modal content!
 
 ### Infinite Scroll / Lazy Loading
 Content loads as you scroll:
@@ -98,12 +120,24 @@ When asked to scrape/extract data:
 - **Be Efficient**: Don't over-explain, just execute
 - **Be Adaptive**: Page structure varies - figure out what works for THIS page
 
-## Scroll Decision Tree
+## Scroll Decision Tree (ALWAYS CHECK THIS)
 
-Need to see more content?
-  - Is there a modal/popup/dialog visible?
-    - YES: Find modal container in element map, use scroll(direction, amount, element_id=<modal_index>)
-    - NO: Use scroll(direction, amount) for page scroll
+Before scrolling, ask yourself:
+1. Did I just click a button that opened a popup/modal/overlay?
+2. Is the content I need to scroll inside a container (not the main page)?
+3. Are there many new elements that appeared after clicking?
+
+If YES to any → Use one of these:
+→ scroll(direction, amount, auto_detect=true) ← EASIEST, recommended
+→ scroll(direction, amount, element_id=<container_index>) ← if you know the index
+
+If NO (scrolling main page content):
+→ scroll(direction, amount) ← no element_id or auto_detect needed
+
+**Instagram Example:**
+- Clicked "comments" button → Modal opened with 90+ new elements
+- Use: scroll(direction="down", amount=500, auto_detect=true)
+- Or if you found the container: scroll(direction="down", amount=500, element_id=91)
 
 ## When to Complete
 

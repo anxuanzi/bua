@@ -333,11 +333,28 @@ func (a *Agent) Start(ctx context.Context) error {
 
 	// Create launcher - viewport will be set via CDP for proper responsive handling
 	a.launcher = launcher.New().
-		Set("disable-blink-features", "AutomationControlled"). // Avoid detection
+		// Anti-detection flags
+		Set("disable-blink-features", "AutomationControlled").
 		Set("disable-infobars").
 		Set("disable-dev-shm-usage").
 		Set("no-first-run").
 		Set("no-default-browser-check").
+		// Media playback flags (for Instagram Reels, YouTube, etc.)
+		Set("autoplay-policy", "no-user-gesture-required").
+		Set("disable-features", "PreloadMediaEngagementData,MediaEngagementBypassAutoplayPolicies").
+		Set("enable-features", "NetworkService,NetworkServiceInProcess").
+		// Additional anti-detection
+		Set("disable-background-networking").
+		Set("disable-client-side-phishing-detection").
+		Set("disable-default-apps").
+		Set("disable-extensions").
+		Set("disable-hang-monitor").
+		Set("disable-popup-blocking").
+		Set("disable-prompt-on-repost").
+		Set("disable-sync").
+		Set("disable-translate").
+		Set("metrics-recording-only").
+		Set("safebrowsing-disable-auto-update").
 		Set("window-size", fmt.Sprintf("%d,%d", a.config.Viewport.Width, a.config.Viewport.Height)).
 		Headless(a.config.Headless)
 
