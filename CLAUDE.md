@@ -25,6 +25,73 @@ go vet ./...
 go mod tidy
 ```
 
+## Testing Philosophy
+
+**IMPORTANT: Unit tests do NOT work for AI browser agents.**
+
+Traditional Go unit tests (`go test`) are useful for pure functions and isolated logic, but they **cannot** validate AI agent behavior. The value of bua-go is in real browser interaction with an LLM making decisions - this cannot be mocked or unit tested meaningfully.
+
+### Why Unit Tests Fail for AI Agents
+
+1. **Non-deterministic behavior**: LLM responses vary between runs
+2. **Real browser required**: DOM extraction, screenshots, and element interaction need actual browsers
+3. **Integration is the point**: Testing isolated components misses the core functionality
+4. **Vision + DOM hybrid**: The agent sees annotated screenshots - can't be simulated
+
+### E2E Test System
+
+All testing must use the e2e test system in `tests/e2e/`:
+
+```bash
+# Run all e2e tests
+go run tests/e2e/run_tests.go
+
+# Run specific category
+go run tests/e2e/run_tests.go --category basic
+
+# Run single test
+go run tests/e2e/run_tests.go --test "google-search"
+
+# Verbose output with step details
+go run tests/e2e/run_tests.go --verbose
+
+# Keep browser visible for debugging
+go run tests/e2e/run_tests.go --no-headless
+```
+
+### Test Structure
+
+Tests are defined in YAML files under `tests/e2e/tasks/`:
+
+```yaml
+tests:
+  - name: example-page-load
+    description: Navigate to example.com and verify page loads
+    url: https://example.com
+    task: "Get the page title and main heading"
+    timeout: 1m
+    expected:
+      success: true
+      contains_data:
+        - "Example Domain"
+```
+
+### Adding New Tests
+
+1. Create or edit a YAML file in `tests/e2e/tasks/`
+2. Define test name, URL, task prompt, and expectations
+3. Run with `--test "test-name"` to verify
+4. Use `--verbose --no-headless` for debugging
+
+### Test Categories
+
+| File | Purpose |
+|------|---------|
+| `basic.yaml` | Navigation, clicking, page content |
+| `forms.yaml` | Form filling, dropdowns, checkboxes |
+| `scraping.yaml` | Data extraction, tables, lists |
+| `scroll.yaml` | Scrolling, infinite scroll, element scroll |
+
 ## Architecture Overview
 
 bua-go is a browser automation library powered by Google ADK (Agent Development Kit) and Gemini LLMs. It uses a **vision + DOM hybrid approach**.
