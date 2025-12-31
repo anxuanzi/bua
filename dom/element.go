@@ -1,15 +1,8 @@
-// Package dom provides DOM extraction and element mapping functionality.
 package dom
 
-import (
-	"context"
-	"fmt"
-	"strings"
+import "sync"
 
-	"github.com/go-rod/rod"
-)
-
-// BoundingBox represents the bounding box of an element.
+// BoundingBox represents an element's position and size on the page.
 type BoundingBox struct {
 	X      float64 `json:"x"`
 	Y      float64 `json:"y"`
@@ -17,21 +10,36 @@ type BoundingBox struct {
 	Height float64 `json:"height"`
 }
 
-// Element represents a single element in the element map.
+// Center returns the center point of the bounding box.
+func (b BoundingBox) Center() (x, y float64) {
+	return b.X + b.Width/2, b.Y + b.Height/2
+}
+
+// Contains checks if a point is within the bounding box.
+func (b BoundingBox) Contains(x, y float64) bool {
+	return x >= b.X && x <= b.X+b.Width && y >= b.Y && y <= b.Y+b.Height
+}
+
+// IsEmpty returns true if the bounding box has no area.
+func (b BoundingBox) IsEmpty() bool {
+	return b.Width <= 0 || b.Height <= 0
+}
+
+// Element represents an interactive page element.
 type Element struct {
-	// Index is the unique identifier for this element (used in annotations).
+	// Index is the element's index for LLM reference (0-based).
 	Index int `json:"index"`
 
-	// TagName is the HTML tag name (e.g., "button", "input", "a").
+	// TagName is the HTML tag name (lowercase).
 	TagName string `json:"tagName"`
 
-	// Role is the accessibility role (e.g., "button", "link", "textbox").
+	// Role is the ARIA role or inferred role.
 	Role string `json:"role,omitempty"`
 
 	// Name is the accessible name of the element.
 	Name string `json:"name,omitempty"`
 
-	// Text is the visible text content of the element.
+	// Text is the visible text content (truncated).
 	Text string `json:"text,omitempty"`
 
 	// Type is the input type for input elements.
@@ -40,46 +48,78 @@ type Element struct {
 	// Href is the link URL for anchor elements.
 	Href string `json:"href,omitempty"`
 
-	// Placeholder is the placeholder text for input elements.
+	// Placeholder is the placeholder text for inputs.
 	Placeholder string `json:"placeholder,omitempty"`
 
-	// Value is the current value for input elements.
+	// Value is the current value for form elements.
 	Value string `json:"value,omitempty"`
 
 	// AriaLabel is the aria-label attribute.
 	AriaLabel string `json:"ariaLabel,omitempty"`
 
-	// BoundingBox is the element's position and size on the page.
+	// BoundingBox is the element's position and size.
 	BoundingBox BoundingBox `json:"boundingBox"`
 
-	// IsVisible indicates whether the element is visible.
+	// IsVisible indicates if the element is visible in the viewport.
 	IsVisible bool `json:"isVisible"`
 
-	// IsEnabled indicates whether the element is enabled (not disabled).
+	// IsEnabled indicates if the element is not disabled.
 	IsEnabled bool `json:"isEnabled"`
 
-	// IsFocusable indicates whether the element can receive focus.
+	// IsFocusable indicates if the element can receive focus.
 	IsFocusable bool `json:"isFocusable"`
 
-	// IsInteractive indicates whether the element is interactive.
+	// IsInteractive indicates if the element is interactive.
 	IsInteractive bool `json:"isInteractive"`
 
-	// Selector is a CSS selector that can be used to find this element.
+	// Selector is a unique CSS selector for the element.
 	Selector string `json:"selector,omitempty"`
 
-	// BackendNodeID is the Chrome DevTools Protocol backend node ID.
+	// BackendNodeID is the CDP backend node ID.
 	BackendNodeID int `json:"backendNodeId,omitempty"`
+}
+
+// Description returns a human-readable description of the element.
+func (e *Element) Description() string {
+	if e.AriaLabel != "" {
+		return e.AriaLabel
+	}
+	if e.Name != "" {
+		return e.Name
+	}
+	if e.Placeholder != "" {
+		return e.Placeholder
+	}
+	if e.Text != "" {
+		if len(e.Text) > 50 {
+			return e.Text[:50] + "..."
+		}
+		return e.Text
+	}
+	if e.Value != "" {
+		return e.Value
+	}
+	return e.TagName
 }
 
 // ElementMap holds all interactive elements on a page.
 type ElementMap struct {
-	Elements  []*Element       `json:"elements"`
-	indexMap  map[int]*Element // Quick lookup by index
-	PageURL   string           `json:"pageUrl"`
-	PageTitle string           `json:"pageTitle"`
+	// Elements is the list of interactive elements.
+	Elements []*Element
+
+	// PageURL is the current page URL.
+	PageURL string
+
+	// PageTitle is the current page title.
+	PageTitle string
+
+	// indexMap provides O(1) lookup by index.
+	indexMap map[int]*Element
+
+	mu sync.RWMutex
 }
 
-// NewElementMap creates a new element map.
+// NewElementMap creates a new empty element map.
 func NewElementMap() *ElementMap {
 	return &ElementMap{
 		Elements: make([]*Element, 0),
@@ -89,357 +129,94 @@ func NewElementMap() *ElementMap {
 
 // Add adds an element to the map.
 func (m *ElementMap) Add(el *Element) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
 	m.Elements = append(m.Elements, el)
 	m.indexMap[el.Index] = el
 }
 
-// ByIndex returns an element by its index.
-func (m *ElementMap) ByIndex(index int) (*Element, bool) {
+// Get returns an element by index.
+func (m *ElementMap) Get(index int) (*Element, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	el, ok := m.indexMap[index]
 	return el, ok
 }
 
-// Count returns the number of elements in the map.
-func (m *ElementMap) Count() int {
+// Len returns the number of elements.
+func (m *ElementMap) Len() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	return len(m.Elements)
 }
 
-// InteractiveElements returns only interactive elements.
-func (m *ElementMap) InteractiveElements() []*Element {
-	result := make([]*Element, 0)
+// Clear removes all elements.
+func (m *ElementMap) Clear() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	m.Elements = make([]*Element, 0)
+	m.indexMap = make(map[int]*Element)
+}
+
+// FindBySelector returns the first element matching the selector.
+func (m *ElementMap) FindBySelector(selector string) (*Element, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
 	for _, el := range m.Elements {
-		if el.IsInteractive && el.IsVisible {
-			result = append(result, el)
+		if el.Selector == selector {
+			return el, true
 		}
 	}
-	return result
+	return nil, false
 }
 
-// ToTokenString converts the element map to a token-efficient string for LLM context.
-// Use ToTokenStringLimited for better token management.
-func (m *ElementMap) ToTokenString() string {
-	return m.ToTokenStringLimited(0) // 0 = no limit
-}
+// FindByText returns elements containing the given text.
+func (m *ElementMap) FindByText(text string) []*Element {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
 
-// ToTokenStringLimited converts the element map with a maximum element count.
-// This is critical for staying within LLM context limits.
-// maxElements <= 0 means no limit.
-// Recommended: 150-200 for most LLMs to balance context and visibility.
-func (m *ElementMap) ToTokenStringLimited(maxElements int) string {
-	var sb strings.Builder
-
-	// Count visible elements for accurate header
-	visibleCount := 0
+	var results []*Element
 	for _, el := range m.Elements {
-		if el.IsVisible {
-			visibleCount++
+		if containsIgnoreCase(el.Text, text) ||
+			containsIgnoreCase(el.AriaLabel, text) ||
+			containsIgnoreCase(el.Name, text) {
+			results = append(results, el)
 		}
 	}
-
-	sb.WriteString(fmt.Sprintf("Page: %s\n", m.PageTitle))
-	sb.WriteString(fmt.Sprintf("URL: %s\n", m.PageURL))
-
-	if maxElements > 0 && visibleCount > maxElements {
-		sb.WriteString(fmt.Sprintf("Elements (%d of %d shown):\n", maxElements, visibleCount))
-	} else {
-		sb.WriteString(fmt.Sprintf("Elements (%d):\n", visibleCount))
-	}
-
-	count := 0
-	for _, el := range m.Elements {
-		if !el.IsVisible {
-			continue
-		}
-
-		// Check limit
-		if maxElements > 0 && count >= maxElements {
-			break
-		}
-		count++
-
-		// Format: [index] tag role "text" (type=value, href=url)
-		sb.WriteString(fmt.Sprintf("[%d] %s", el.Index, el.TagName))
-
-		if el.Role != "" && el.Role != el.TagName {
-			sb.WriteString(fmt.Sprintf(" role=%s", el.Role))
-		}
-
-		if el.Name != "" {
-			sb.WriteString(fmt.Sprintf(" name=%q", truncate(el.Name, 50)))
-		} else if el.Text != "" {
-			sb.WriteString(fmt.Sprintf(" %q", truncate(el.Text, 50)))
-		} else if el.AriaLabel != "" {
-			sb.WriteString(fmt.Sprintf(" aria=%q", truncate(el.AriaLabel, 50)))
-		} else if el.Placeholder != "" {
-			sb.WriteString(fmt.Sprintf(" placeholder=%q", truncate(el.Placeholder, 50)))
-		}
-
-		if el.Type != "" {
-			sb.WriteString(fmt.Sprintf(" type=%s", el.Type))
-		}
-
-		if el.Href != "" {
-			sb.WriteString(fmt.Sprintf(" href=%q", truncate(el.Href, 80)))
-		}
-
-		if !el.IsEnabled {
-			sb.WriteString(" [disabled]")
-		}
-
-		sb.WriteString("\n")
-	}
-
-	return sb.String()
+	return results
 }
 
-func truncate(s string, maxLen int) string {
-	if len(s) <= maxLen {
-		return s
+// containsIgnoreCase checks if s contains substr (case-insensitive).
+func containsIgnoreCase(s, substr string) bool {
+	if s == "" || substr == "" {
+		return false
 	}
-	return s[:maxLen-3] + "..."
-}
+	// Simple ASCII lowercase comparison
+	sLower := toLower(s)
+	substrLower := toLower(substr)
 
-// ExtractElementMap extracts interactive elements from the page.
-func ExtractElementMap(ctx context.Context, page *rod.Page) (*ElementMap, error) {
-	elementMap := NewElementMap()
-
-	// Get page info
-	info, err := page.Info()
-	if err == nil {
-		elementMap.PageURL = info.URL
-		elementMap.PageTitle = info.Title
-	}
-
-	// JavaScript to extract interactive elements
-	js := `() => {
-		const interactiveTags = ['a', 'button', 'input', 'select', 'textarea', 'label'];
-		const interactiveRoles = ['button', 'link', 'textbox', 'checkbox', 'radio', 'combobox', 'listbox', 'menuitem', 'tab', 'switch'];
-
-		const elements = [];
-		let index = 0;
-
-		// Helper to check if element is visible
-		function isVisible(el) {
-			const rect = el.getBoundingClientRect();
-			const style = window.getComputedStyle(el);
-			return rect.width > 0 &&
-				   rect.height > 0 &&
-				   style.visibility !== 'hidden' &&
-				   style.display !== 'none' &&
-				   parseFloat(style.opacity) > 0;
+	for i := 0; i <= len(sLower)-len(substrLower); i++ {
+		if sLower[i:i+len(substrLower)] == substrLower {
+			return true
 		}
-
-		// Helper to check if element is interactive
-		function isInteractive(el) {
-			const tag = el.tagName.toLowerCase();
-			const role = el.getAttribute('role');
-			const tabIndex = el.getAttribute('tabindex');
-
-			if (interactiveTags.includes(tag)) return true;
-			if (role && interactiveRoles.includes(role)) return true;
-			if (tabIndex !== null && tabIndex !== '-1') return true;
-			if (el.onclick || el.getAttribute('onclick')) return true;
-			if (el.classList.contains('clickable') || el.classList.contains('btn')) return true;
-
-			return false;
-		}
-
-		// Find all potentially interactive elements
-		const allElements = document.querySelectorAll('a, button, input, select, textarea, [role], [tabindex], [onclick], .clickable, .btn');
-
-		for (const el of allElements) {
-			if (!isInteractive(el)) continue;
-
-			const visible = isVisible(el);
-			if (!visible) continue;
-
-			const rect = el.getBoundingClientRect();
-			const tag = el.tagName.toLowerCase();
-
-			// Extract text content
-			let text = '';
-			if (tag === 'input' || tag === 'textarea') {
-				text = el.value || '';
-			} else {
-				text = el.innerText || el.textContent || '';
-			}
-			text = text.trim().substring(0, 200);
-
-			elements.push({
-				index: index++,
-				tagName: tag,
-				role: el.getAttribute('role') || '',
-				name: el.getAttribute('name') || '',
-				text: text,
-				type: el.type || '',
-				href: el.href || '',
-				placeholder: el.placeholder || '',
-				value: el.value || '',
-				ariaLabel: el.getAttribute('aria-label') || '',
-				boundingBox: {
-					x: rect.x,
-					y: rect.y,
-					width: rect.width,
-					height: rect.height
-				},
-				isVisible: visible,
-				isEnabled: !el.disabled,
-				isFocusable: el.tabIndex >= 0,
-				isInteractive: true
-			});
-
-			// Limit to prevent huge element maps
-			if (index >= 500) break;
-		}
-
-		return elements;
-	}`
-
-	result, err := page.Eval(js)
-	if err != nil {
-		return nil, fmt.Errorf("failed to extract elements: %w", err)
-	}
-
-	// Parse the result
-	var rawElements []map[string]any
-	if err := result.Value.Unmarshal(&rawElements); err != nil {
-		return nil, fmt.Errorf("failed to parse elements: %w", err)
-	}
-
-	for _, raw := range rawElements {
-		el := &Element{
-			Index:         int(raw["index"].(float64)),
-			TagName:       getString(raw, "tagName"),
-			Role:          getString(raw, "role"),
-			Name:          getString(raw, "name"),
-			Text:          getString(raw, "text"),
-			Type:          getString(raw, "type"),
-			Href:          getString(raw, "href"),
-			Placeholder:   getString(raw, "placeholder"),
-			Value:         getString(raw, "value"),
-			AriaLabel:     getString(raw, "ariaLabel"),
-			IsVisible:     getBool(raw, "isVisible"),
-			IsEnabled:     getBool(raw, "isEnabled"),
-			IsFocusable:   getBool(raw, "isFocusable"),
-			IsInteractive: getBool(raw, "isInteractive"),
-		}
-
-		if bb, ok := raw["boundingBox"].(map[string]any); ok {
-			el.BoundingBox = BoundingBox{
-				X:      getFloat(bb, "x"),
-				Y:      getFloat(bb, "y"),
-				Width:  getFloat(bb, "width"),
-				Height: getFloat(bb, "height"),
-			}
-		}
-
-		elementMap.Add(el)
-	}
-
-	return elementMap, nil
-}
-
-func getString(m map[string]any, key string) string {
-	if v, ok := m[key].(string); ok {
-		return v
-	}
-	return ""
-}
-
-func getBool(m map[string]any, key string) bool {
-	if v, ok := m[key].(bool); ok {
-		return v
 	}
 	return false
 }
 
-func getFloat(m map[string]any, key string) float64 {
-	if v, ok := m[key].(float64); ok {
-		return v
-	}
-	return 0
-}
-
-// ExtractElementBySelector finds a specific element by CSS selector.
-func ExtractElementBySelector(ctx context.Context, page *rod.Page, selector string) (*Element, error) {
-	js := fmt.Sprintf(`() => {
-		const el = document.querySelector(%q);
-		if (!el) return null;
-
-		const rect = el.getBoundingClientRect();
-		const style = window.getComputedStyle(el);
-		const tag = el.tagName.toLowerCase();
-
-		let text = '';
-		if (tag === 'input' || tag === 'textarea') {
-			text = el.value || '';
-		} else {
-			text = el.innerText || el.textContent || '';
+// toLower converts ASCII characters to lowercase.
+func toLower(s string) string {
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
 		}
-
-		return {
-			tagName: tag,
-			role: el.getAttribute('role') || '',
-			name: el.getAttribute('name') || '',
-			text: text.trim().substring(0, 200),
-			type: el.type || '',
-			href: el.href || '',
-			placeholder: el.placeholder || '',
-			value: el.value || '',
-			ariaLabel: el.getAttribute('aria-label') || '',
-			boundingBox: {
-				x: rect.x,
-				y: rect.y,
-				width: rect.width,
-				height: rect.height
-			},
-			isVisible: rect.width > 0 && rect.height > 0 && style.visibility !== 'hidden' && style.display !== 'none',
-			isEnabled: !el.disabled,
-			isFocusable: el.tabIndex >= 0,
-			isInteractive: true
-		};
-	}`, selector)
-
-	result, err := page.Eval(js)
-	if err != nil {
-		return nil, fmt.Errorf("failed to find element: %w", err)
+		b[i] = c
 	}
-
-	if result.Value.Nil() {
-		return nil, fmt.Errorf("element not found: %s", selector)
-	}
-
-	var raw map[string]any
-	if err := result.Value.Unmarshal(&raw); err != nil {
-		return nil, fmt.Errorf("failed to parse element: %w", err)
-	}
-
-	el := &Element{
-		Index:         0,
-		TagName:       getString(raw, "tagName"),
-		Role:          getString(raw, "role"),
-		Name:          getString(raw, "name"),
-		Text:          getString(raw, "text"),
-		Type:          getString(raw, "type"),
-		Href:          getString(raw, "href"),
-		Placeholder:   getString(raw, "placeholder"),
-		Value:         getString(raw, "value"),
-		AriaLabel:     getString(raw, "ariaLabel"),
-		Selector:      selector,
-		IsVisible:     getBool(raw, "isVisible"),
-		IsEnabled:     getBool(raw, "isEnabled"),
-		IsFocusable:   getBool(raw, "isFocusable"),
-		IsInteractive: getBool(raw, "isInteractive"),
-	}
-
-	if bb, ok := raw["boundingBox"].(map[string]any); ok {
-		el.BoundingBox = BoundingBox{
-			X:      getFloat(bb, "x"),
-			Y:      getFloat(bb, "y"),
-			Width:  getFloat(bb, "width"),
-			Height: getFloat(bb, "height"),
-		}
-	}
-
-	return el, nil
+	return string(b)
 }

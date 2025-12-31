@@ -1,1154 +1,409 @@
-// Package agent provides the ADK-based browser automation agent.
 package agent
 
 import (
 	"context"
-	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"time"
 
+	"github.com/anxuanzi/bua/browser"
 	"google.golang.org/adk/agent"
 	"google.golang.org/adk/agent/llmagent"
 	"google.golang.org/adk/model/gemini"
-	"google.golang.org/adk/tool"
-	"google.golang.org/adk/tool/functiontool"
+	"google.golang.org/adk/runner"
+	"google.golang.org/adk/session"
 	"google.golang.org/genai"
-
-	"github.com/anxuanzi/bua-go/browser"
-	"github.com/anxuanzi/bua-go/dom"
 )
 
-// Config holds agent configuration.
-type Config struct {
-	// APIKey is the Gemini API key.
-	APIKey string
-
-	// Model is the model ID to use.
-	Model string
-
-	// MaxIterations is the maximum number of agent loop iterations.
-	MaxIterations int
-
-	// MaxTokens is the maximum context window size.
-	MaxTokens int
-
-	// Debug enables verbose logging.
-	Debug bool
-
-	// ShowAnnotations enables visual element annotations before actions.
-	ShowAnnotations bool
-
-	// ScreenshotDir is the directory to save annotated screenshots.
-	ScreenshotDir string
-
-	// ScreenshotMode controls when screenshots are sent to the model.
-	// "normal" (default): Only in get_page_state responses
-	// "smart": After each action + in get_page_state responses
-	ScreenshotMode string
-
-	// MaxElements limits elements sent to LLM (default 150, 0 = no limit).
-	// Critical for staying within context limits - 500 elements can use 50K+ tokens.
-	MaxElements int
-
-	// ScreenshotMaxWidth is the max width for LLM screenshots (default 800).
-	// Smaller = fewer tokens. 800px is readable while being ~10x smaller than full size.
-	ScreenshotMaxWidth int
-
-	// ScreenshotQuality is JPEG quality for LLM screenshots (default 60, range 1-100).
-	// Lower = smaller file but more artifacts. 60 is good balance.
-	ScreenshotQuality int
-
-	// TextOnly disables all screenshot capture for faster, lower-token operation.
-	// When enabled, the agent relies only on element map text data.
-	// Best for: text extraction, form filling, simple navigation where visual context isn't needed.
-	TextOnly bool
-
-	// EnhancedDOM enables CDP-based DOM extraction with advanced features.
-	// Includes paint order filtering, containment filtering, cursor-based detection.
-	EnhancedDOM bool
-}
-
-// BrowserAgent wraps an ADK agent with browser automation capabilities.
+// BrowserAgent is the main agent that controls browser automation via LLM using ADK.
 type BrowserAgent struct {
-	config    Config
-	browser   *browser.Browser
-	adkAgent  agent.Agent
-	logger    *Logger
-	tools     []tool.Tool
-	tokenizer *Tokenizer
-
-	// Enhanced DOM tracking for change detection
-	prevEnhancedMap *dom.EnhancedElementMap
+	agent          agent.Agent
+	runner         *runner.Runner
+	sessionService session.Service
+	browser        *browser.Browser
+	toolkit        *BrowserToolkit
+	messageManager *MessageManager
+	maxSteps       int
+	maxFailures    int
+	debug          bool
+	steps          []Step
 }
 
-// New creates a new browser agent.
-func New(cfg Config, b *browser.Browser) *BrowserAgent {
-	if cfg.MaxIterations == 0 {
-		cfg.MaxIterations = 50
-	}
-	if cfg.MaxTokens == 0 {
-		cfg.MaxTokens = 1048576 // gemini-3-flash-preview input limit
-	}
-	if cfg.Model == "" {
-		cfg.Model = "gemini-3-flash-preview"
-	}
-
-	return &BrowserAgent{
-		config:  cfg,
-		browser: b,
-		logger:  NewLogger(cfg.Debug),
-	}
+// Step represents a single step in the agent's execution.
+type Step struct {
+	Number     int       `json:"number"`
+	Action     string    `json:"action"`
+	Target     string    `json:"target,omitempty"`
+	Thinking   string    `json:"thinking,omitempty"`
+	Evaluation string    `json:"evaluation,omitempty"`
+	Memory     string    `json:"memory,omitempty"`
+	NextGoal   string    `json:"next_goal,omitempty"`
+	Result     string    `json:"result,omitempty"`
+	Success    bool      `json:"success"`
+	Timestamp  time.Time `json:"timestamp"`
+	DurationMs int64     `json:"duration_ms"`
 }
 
-// Init initializes the ADK agent with browser tools.
-func (a *BrowserAgent) Init(ctx context.Context) error {
-	// Get API key
-	apiKey := a.config.APIKey
+// AgentConfig configures the browser agent.
+type AgentConfig struct {
+	APIKey          string
+	Model           string
+	MaxSteps        int
+	MaxHistoryItems int
+	MaxElements     int
+	MaxFailures     int
+	TextOnly        bool
+	MaxWidth        int
+	Debug           bool
+}
+
+// Result represents the outcome of an agent run.
+type Result struct {
+	Success    bool          `json:"success"`
+	Data       any           `json:"data,omitempty"`
+	Error      string        `json:"error,omitempty"`
+	Steps      []Step        `json:"steps"`
+	Duration   time.Duration `json:"duration"`
+	TokensUsed int           `json:"tokens_used,omitempty"`
+}
+
+// NewBrowserAgent creates a new browser agent using ADK.
+func NewBrowserAgent(ctx context.Context, cfg AgentConfig, b *browser.Browser) (*BrowserAgent, error) {
+	// Get API key from config or environment
+	apiKey := cfg.APIKey
 	if apiKey == "" {
 		apiKey = os.Getenv("GOOGLE_API_KEY")
 	}
-
-	// Create tokenizer for accurate token counting
-	tokenizer, err := NewTokenizer(ctx, TokenizerConfig{
-		APIKey:    apiKey,
-		Model:     a.config.Model,
-		MaxTokens: a.config.MaxTokens,
-	})
-	if err != nil {
-		// Non-fatal: fall back to estimation if tokenizer fails
-		a.logger.Info("Warning: tokenizer init failed, using estimation: %v", err)
-	} else {
-		a.tokenizer = tokenizer
+	if apiKey == "" {
+		apiKey = os.Getenv("GEMINI_API_KEY")
+	}
+	if apiKey == "" {
+		return nil, fmt.Errorf("API key required: set APIKey in config or GOOGLE_API_KEY environment variable")
 	}
 
-	// Create Gemini model
-	model, err := gemini.NewModel(ctx, a.config.Model, &genai.ClientConfig{
+	// Set model with default
+	modelName := cfg.Model
+	if modelName == "" {
+		modelName = "gemini-2.0-flash"
+	}
+
+	// Set max steps with default
+	maxSteps := cfg.MaxSteps
+	if maxSteps <= 0 {
+		maxSteps = 100
+	}
+
+	// Set max history items with default
+	maxHistoryItems := cfg.MaxHistoryItems
+	if maxHistoryItems <= 0 {
+		maxHistoryItems = 20
+	}
+
+	// Set max elements with default
+	maxElements := cfg.MaxElements
+	if maxElements <= 0 {
+		maxElements = 100
+	}
+
+	// Set max consecutive failures with default
+	maxFailures := cfg.MaxFailures
+	if maxFailures <= 0 {
+		maxFailures = 5
+	}
+
+	// Set max width with default
+	maxWidth := cfg.MaxWidth
+	if maxWidth <= 0 {
+		maxWidth = 1280
+	}
+
+	// Create Gemini model using ADK
+	model, err := gemini.NewModel(ctx, modelName, &genai.ClientConfig{
 		APIKey: apiKey,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create Gemini model: %w", err)
+		return nil, fmt.Errorf("failed to create Gemini model: %w", err)
 	}
 
-	// Create browser tools
-	tools, err := a.createBrowserTools()
+	// Create browser toolkit with tools
+	toolkit := NewBrowserToolkit(b, maxWidth)
+	tools, err := toolkit.CreateAllTools()
 	if err != nil {
-		return fmt.Errorf("failed to create browser tools: %w", err)
+		return nil, fmt.Errorf("failed to create browser tools: %w", err)
 	}
-	a.tools = tools
 
-	// Create ADK agent
-	adkAgent, err := llmagent.New(llmagent.Config{
-		Name:        "browser_automation_agent",
+	// Create message manager
+	messageManager := NewMessageManager(MessageManagerConfig{
+		MaxHistoryItems: maxHistoryItems,
+		MaxElements:     maxElements,
+		UseVision:       !cfg.TextOnly,
+	})
+
+	// Create LLM agent using ADK
+	llmAgent, err := llmagent.New(llmagent.Config{
+		Name:        "browser_agent",
 		Model:       model,
-		Description: "A browser automation agent that can navigate websites, interact with elements, and extract data.",
-		Instruction: SystemPrompt(),
+		Description: "An expert web browser automation agent that helps users accomplish tasks by interacting with web pages.",
+		Instruction: messageManager.GetSystemPrompt(),
 		Tools:       tools,
-		GenerateContentConfig: &genai.GenerateContentConfig{
-			Temperature:     genai.Ptr[float32](0.2),
-			MaxOutputTokens: 16384, // Conservative output limit (model supports 65536)
-		},
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create ADK agent: %w", err)
+		return nil, fmt.Errorf("failed to create LLM agent: %w", err)
 	}
-	a.adkAgent = adkAgent
 
-	return nil
+	// Create in-memory session service using ADK
+	sessionService := session.InMemoryService()
+
+	// Create runner using ADK
+	agentRunner, err := runner.New(runner.Config{
+		AppName:        "bua-browser-agent",
+		Agent:          llmAgent,
+		SessionService: sessionService,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create runner: %w", err)
+	}
+
+	return &BrowserAgent{
+		agent:          llmAgent,
+		runner:         agentRunner,
+		sessionService: sessionService,
+		browser:        b,
+		toolkit:        toolkit,
+		messageManager: messageManager,
+		maxSteps:       maxSteps,
+		maxFailures:    maxFailures,
+		debug:          cfg.Debug,
+		steps:          make([]Step, 0),
+	}, nil
 }
 
-// getElementMap returns elements using either enhanced or standard extraction based on config.
-// For enhanced mode, it tracks the previous map for new element detection.
-func (a *BrowserAgent) getElementMap(ctx context.Context) (*dom.ElementMap, error) {
-	if a.config.EnhancedDOM {
-		enhanced, err := a.browser.GetEnhancedElementMap(ctx, a.prevEnhancedMap)
-		if err != nil {
-			// Fall back to standard extraction on error
-			return a.browser.GetElementMap(ctx)
-		}
-		a.prevEnhancedMap = enhanced
-		return &enhanced.ElementMap, nil
-	}
-	return a.browser.GetElementMap(ctx)
-}
+// Run executes a task and returns the result.
+func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
+	startTime := time.Now()
+	a.steps = make([]Step, 0)
+	a.messageManager.Clear()
+	a.messageManager.SetTask(task)
 
-// getElementMapEnhanced returns the enhanced element map when in enhanced mode.
-// Returns nil if not in enhanced mode or if extraction fails.
-func (a *BrowserAgent) getElementMapEnhanced(ctx context.Context) *dom.EnhancedElementMap {
-	if !a.config.EnhancedDOM {
-		return nil
+	// Get initial page state
+	if err := a.toolkit.RefreshElementMap(); err != nil {
+		// Continue even if initial state fails - page might be blank
+		if a.debug {
+			fmt.Printf("[Debug] Initial page state: %v\n", err)
+		}
 	}
-	enhanced, err := a.browser.GetEnhancedElementMap(ctx, a.prevEnhancedMap)
+
+	// Generate a unique session ID for this task
+	sessionID := fmt.Sprintf("session-%d", time.Now().UnixNano())
+	userID := "user"
+
+	// Create session before running
+	_, err := a.sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   "bua-browser-agent",
+		UserID:    userID,
+		SessionID: sessionID,
+	})
 	if err != nil {
-		return nil
-	}
-	a.prevEnhancedMap = enhanced
-	return enhanced
-}
-
-// preAction is called before browser actions to show annotations and capture state.
-func (a *BrowserAgent) preAction() {
-	if a.browser == nil || !a.config.ShowAnnotations {
-		return
+		return nil, fmt.Errorf("failed to create session: %w", err)
 	}
 
-	bgCtx := context.Background()
+	// Build the initial task message with page state
+	taskMessage := a.messageManager.BuildInitialTaskMessage(task, a.toolkit.GetElementMap())
 
-	// Get element map (uses enhanced extraction if enabled)
-	elements, err := a.getElementMap(bgCtx)
-	if err != nil {
-		a.logger.Error("preAction/getElementMap", err)
-		return
-	}
+	// Filter sensitive data
+	taskMessage = a.messageManager.FilterSensitiveData(taskMessage)
 
-	// Show annotations in browser
-	err = a.browser.ShowAnnotations(bgCtx, elements, nil)
-	if err != nil {
-		a.logger.Error("preAction/ShowAnnotations", err)
-	} else {
-		a.logger.Annotation(elements.Count())
-	}
+	// Create user message content
+	userContent := genai.NewContentFromText(taskMessage, "user")
 
-	// Take screenshot (browser overlay is already visible, no need for Go-based annotations)
-	if a.config.ScreenshotDir != "" {
-		screenshot, err := a.browser.Screenshot(bgCtx)
-		if err != nil {
-			a.logger.Error("preAction/Screenshot", err)
-			return
+	// Run the agent using ADK runner
+	turnNum := 0
+	toolCallNum := 0
+	taskComplete := false
+	var lastResult *Result
+	var lastActionName string
+	var lastActionResult string
+	var lastActionSuccess bool
+
+	for toolCallNum < a.maxSteps && !taskComplete {
+		turnNum++
+
+		if a.debug {
+			fmt.Printf("[Turn %d] Starting...\n", turnNum)
 		}
 
-		filename := fmt.Sprintf("step_%03d_%s.png",
-			a.logger.GetStep()+1,
-			time.Now().Format("150405"))
-		a.saveScreenshotToFile(screenshot, filename)
-	}
-}
-
-// postAction is called after browser actions to clean up annotations.
-func (a *BrowserAgent) postAction() {
-	if a.browser == nil || !a.config.ShowAnnotations {
-		return
-	}
-
-	bgCtx := context.Background()
-
-	// Hide annotations after action
-	if err := a.browser.HideAnnotations(bgCtx); err != nil {
-		a.logger.Error("postAction/HideAnnotations", err)
-	}
-
-	// Wait for page to stabilize
-	a.browser.WaitForStable(bgCtx)
-}
-
-// saveScreenshotToFile saves screenshot to disk as fallback.
-func (a *BrowserAgent) saveScreenshotToFile(data []byte, filename string) {
-	path := filepath.Join(a.config.ScreenshotDir, filename)
-	if err := os.MkdirAll(a.config.ScreenshotDir, 0755); err != nil {
-		a.logger.Error("saveScreenshotToFile/MkdirAll", err)
-		return
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		a.logger.Error("saveScreenshotToFile/WriteFile", err)
-		return
-	}
-	a.logger.Screenshot(path, true)
-}
-
-// captureScreenshotForResponse captures a compressed screenshot for tool response in smart mode.
-// Returns base64-encoded JPEG if smart mode is enabled, empty string otherwise.
-func (a *BrowserAgent) captureScreenshotForResponse() string {
-	// Skip screenshot capture in TextOnly mode or non-smart mode
-	if a.config.TextOnly || a.config.ScreenshotMode != "smart" {
-		return ""
-	}
-
-	bgCtx := context.Background()
-
-	// Get elements for annotations (uses enhanced extraction if enabled)
-	elements, err := a.getElementMap(bgCtx)
-	if err != nil {
-		a.logger.Error("captureScreenshotForResponse/getElementMap", err)
-		return ""
-	}
-
-	// Show annotations if enabled
-	if a.config.ShowAnnotations {
-		if err := a.browser.ShowAnnotations(bgCtx, elements, nil); err != nil {
-			a.logger.Error("captureScreenshotForResponse/ShowAnnotations", err)
-		}
-	}
-
-	// Take compressed screenshot for LLM efficiency
-	maxWidth := a.config.ScreenshotMaxWidth
-	if maxWidth <= 0 {
-		maxWidth = 800
-	}
-	quality := a.config.ScreenshotQuality
-	if quality <= 0 {
-		quality = 60
-	}
-	screenshotData, err := a.browser.ScreenshotForLLM(bgCtx, maxWidth, quality)
-	if err != nil {
-		a.logger.Error("captureScreenshotForResponse/Screenshot", err)
-		return ""
-	}
-
-	// Hide annotations after screenshot
-	if a.config.ShowAnnotations {
-		if err := a.browser.HideAnnotations(bgCtx); err != nil {
-			a.logger.Error("captureScreenshotForResponse/HideAnnotations", err)
-		}
-	}
-
-	return base64.StdEncoding.EncodeToString(screenshotData)
-}
-
-// createBrowserTools creates the function tools for browser automation.
-func (a *BrowserAgent) createBrowserTools() ([]tool.Tool, error) {
-	var tools []tool.Tool
-
-	// Click tool
-	clickHandler := func(ctx tool.Context, input ClickInput) (ClickOutput, error) {
-		if a.browser == nil {
-			return ClickOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		bgCtx := context.Background()
-		a.preAction()
-		defer a.postAction()
-
-		var err error
-		var msg string
-
-		// Check if using coordinates or element index
-		if input.X > 0 && input.Y > 0 {
-			// Coordinate-based click
-			a.logger.Click(0, fmt.Sprintf("at (%d,%d): %s", int(input.X), int(input.Y), input.Reasoning))
-			err = a.browser.ClickAt(bgCtx, input.X, input.Y)
-			msg = fmt.Sprintf("Clicked at coordinates (%d, %d)", int(input.X), int(input.Y))
-		} else {
-			// Element-index click
-			a.logger.Click(input.ElementIndex, input.Reasoning)
-			err = a.browser.Click(bgCtx, input.ElementIndex)
-			msg = fmt.Sprintf("Clicked element %d", input.ElementIndex)
-		}
-
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return ClickOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		a.logger.ActionResult(true, msg)
-		return ClickOutput{Success: true, Message: msg, Screenshot: a.captureScreenshotForResponse()}, nil
-	}
-	clickTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "click",
-			Description: "Click on an element by its index number or at specific coordinates. Use element_index when an element is visible in the element map. Use x,y coordinates as a fallback when element detection fails or for precise positioning.",
-		},
-		clickHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create click tool: %w", err)
-	}
-	tools = append(tools, clickTool)
-
-	// Type tool
-	typeHandler := func(ctx tool.Context, input TypeInput) (TypeOutput, error) {
-		if a.browser == nil {
-			return TypeOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		bgCtx := context.Background()
-		a.preAction()
-		defer a.postAction()
-
-		a.logger.Type(input.ElementIndex, input.Text, input.Reasoning)
-
-		err := a.browser.TypeInElement(bgCtx, input.ElementIndex, input.Text)
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return TypeOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		msg := fmt.Sprintf("Typed '%s' into element %d", input.Text, input.ElementIndex)
-		a.logger.ActionResult(true, msg)
-		return TypeOutput{Success: true, Message: msg, Screenshot: a.captureScreenshotForResponse()}, nil
-	}
-	typeTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "type_text",
-			Description: "Type text into an input field. First clicks the element to focus it, then types the text.",
-		},
-		typeHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create type tool: %w", err)
-	}
-	tools = append(tools, typeTool)
-
-	// Scroll tool
-	scrollHandler := func(ctx tool.Context, input ScrollInput) (ScrollOutput, error) {
-		if a.browser == nil {
-			return ScrollOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		a.preAction()
-		defer a.postAction()
-
-		amount := input.Amount
-		if amount == 0 {
-			amount = 500
-		}
-
-		a.logger.Scroll(input.Direction, amount, input.Reasoning)
-
-		var deltaY float64
-		switch input.Direction {
-		case "up":
-			deltaY = -float64(amount)
-		case "down":
-			deltaY = float64(amount)
-		default:
-			a.logger.ActionResult(false, "Invalid direction")
-			return ScrollOutput{Success: false, Message: "Invalid direction. Use: up or down"}, nil
-		}
-
-		var err error
-		var msg string
-		var elementScrolled int
-
-		// Check if we're scrolling within a specific element (e.g., modal, popup)
-		if input.ElementID > 0 {
-			// Explicit element ID provided
-			err = a.browser.ScrollInElement(context.Background(), input.ElementID, 0, deltaY)
-			elementScrolled = input.ElementID
-			msg = fmt.Sprintf("Scrolled %s by %d pixels within element %d", input.Direction, amount, input.ElementID)
-		} else if input.AutoDetect {
-			// Auto-detect scrollable modal/container
-			elementScrolled, err = a.browser.ScrollInModalAuto(context.Background(), 0, deltaY)
-			if elementScrolled > 0 {
-				msg = fmt.Sprintf("Auto-detected modal: Scrolled %s by %d pixels within element %d", input.Direction, amount, elementScrolled)
-			} else {
-				msg = fmt.Sprintf("No modal detected: Scrolled %s by %d pixels on the page", input.Direction, amount)
+		// Check for too many consecutive failures
+		if a.messageManager.GetHistory().GetConsecutiveFailures() >= a.maxFailures {
+			if a.debug {
+				fmt.Printf("[Turn %d] Too many consecutive failures (%d), forcing completion\n", turnNum, a.maxFailures)
 			}
-		} else {
-			// Default: scroll the page
-			err = a.browser.Scroll(context.Background(), 0, deltaY)
-			msg = fmt.Sprintf("Scrolled %s by %d pixels", input.Direction, amount)
+			return &Result{
+				Success:  false,
+				Error:    fmt.Sprintf("Task aborted after %d consecutive failures", a.maxFailures),
+				Steps:    a.steps,
+				Duration: time.Since(startTime),
+			}, nil
 		}
 
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return ScrollOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		a.logger.ActionResult(true, msg)
-		return ScrollOutput{Success: true, Message: msg, ElementScrolled: elementScrolled, Screenshot: a.captureScreenshotForResponse()}, nil
-	}
-	scrollTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "scroll",
-			Description: "Scroll the page or a scrollable container. After clicking a button that opened a modal/popup, use EITHER: (1) element_id if you know the scrollable container's index, OR (2) auto_detect=true to automatically find and scroll the modal. Without either option, this scrolls the main page which won't work for modal content like Instagram comments.",
-		},
-		scrollHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create scroll tool: %w", err)
-	}
-	tools = append(tools, scrollTool)
-
-	// Navigate tool
-	navigateHandler := func(ctx tool.Context, input NavigateInput) (NavigateOutput, error) {
-		if a.browser == nil {
-			return NavigateOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		// Skip preAction for navigate - no meaningful state to capture before loading a new URL
-		// postAction will still clean up any annotations from previous actions
-		defer a.postAction()
-
-		a.logger.Navigate(input.URL)
-
-		err := a.browser.Navigate(context.Background(), input.URL)
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return NavigateOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		url := a.browser.GetURL()
-		title := a.browser.GetTitle()
-		a.logger.ActionResult(true, fmt.Sprintf("Loaded: %s", title))
-
-		return NavigateOutput{
-			Success:    true,
-			Message:    fmt.Sprintf("Navigated to %s", input.URL),
-			URL:        url,
-			Title:      title,
-			Screenshot: a.captureScreenshotForResponse(),
-		}, nil
-	}
-	navigateTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "navigate",
-			Description: "Navigate to a specific URL.",
-		},
-		navigateHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create navigate tool: %w", err)
-	}
-	tools = append(tools, navigateTool)
-
-	// Wait tool
-	waitHandler := func(ctx tool.Context, input WaitInput) (WaitOutput, error) {
-		if a.browser == nil {
-			return WaitOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		a.logger.Wait(input.Reason)
-
-		err := a.browser.WaitForStable(context.Background())
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return WaitOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		msg := fmt.Sprintf("Waited for page to stabilize: %s", input.Reason)
-		a.logger.ActionResult(true, "Page stable")
-		return WaitOutput{Success: true, Message: msg}, nil
-	}
-	waitTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "wait",
-			Description: "Wait for the page to stabilize after an action or for dynamic content to load.",
-		},
-		waitHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create wait tool: %w", err)
-	}
-	tools = append(tools, waitTool)
-
-	// Get page state tool
-	getPageStateHandler := func(ctx tool.Context, input GetPageStateInput) (GetPageStateOutput, error) {
-		if a.browser == nil {
-			return GetPageStateOutput{Success: false, Error: "Browser not initialized"}, nil
-		}
-
-		bgCtx := context.Background()
-		output := GetPageStateOutput{
-			Success: true,
-			URL:     a.browser.GetURL(),
-			Title:   a.browser.GetTitle(),
-		}
-
-		// Use limited element count to stay within token budget
-		// Default to 150 elements if not configured (balances visibility vs tokens)
-		maxElements := a.config.MaxElements
-		if maxElements <= 0 {
-			maxElements = 150
-		}
-
-		// Get element map (declare at outer scope for use in annotations)
-		var elements *dom.ElementMap
-		var elementsErr error
-
-		// Use enhanced extraction if enabled (with new element markers and filtering)
-		if a.config.EnhancedDOM {
-			enhanced := a.getElementMapEnhanced(bgCtx)
-			if enhanced != nil {
-				output.ElementMap = enhanced.ToTokenStringEnhanced(maxElements)
-				a.logger.PageState(output.URL, output.Title, len(enhanced.Elements))
-				elements = &enhanced.ElementMap // For annotations
-			} else {
-				// Fall back to standard extraction
-				elements, elementsErr = a.getElementMap(bgCtx)
-				if elementsErr != nil {
-					output.Success = false
-					output.Error = fmt.Sprintf("Failed to get element map: %v", elementsErr)
-					a.logger.Error("get_page_state", elementsErr)
-					return output, nil
-				}
-				output.ElementMap = elements.ToTokenStringLimited(maxElements)
-				a.logger.PageState(output.URL, output.Title, elements.Count())
-			}
-		} else {
-			elements, elementsErr = a.getElementMap(bgCtx)
-			if elementsErr != nil {
-				output.Success = false
-				output.Error = fmt.Sprintf("Failed to get element map: %v", elementsErr)
-				a.logger.Error("get_page_state", elementsErr)
-				return output, nil
-			}
-			output.ElementMap = elements.ToTokenStringLimited(maxElements)
-			a.logger.PageState(output.URL, output.Title, elements.Count())
-		}
-
-		// Determine if screenshot should be captured
-		// Skip if: TextOnly mode OR ExcludeScreenshot explicitly set to true
-		excludeScreenshot := a.config.TextOnly
-		if input.ExcludeScreenshot != nil && *input.ExcludeScreenshot {
-			excludeScreenshot = true
-		}
-
-		// Capture screenshot if not excluded
-		if !excludeScreenshot {
-			// Show annotations if enabled (for screenshot only)
-			if a.config.ShowAnnotations {
-				if err := a.browser.ShowAnnotations(bgCtx, elements, nil); err != nil {
-					a.logger.Error("get_page_state/ShowAnnotations", err)
-				}
-			}
-
-			// Take compressed screenshot optimized for LLM context
-			// Default: 800px wide, JPEG quality 60 (~30-50KB vs 500KB+ original)
-			maxWidth := a.config.ScreenshotMaxWidth
-			if maxWidth <= 0 {
-				maxWidth = 800
-			}
-			quality := a.config.ScreenshotQuality
-			if quality <= 0 {
-				quality = 60
-			}
-			screenshotData, err := a.browser.ScreenshotForLLM(bgCtx, maxWidth, quality)
+		// Run the agent for one turn using iter.Seq2 pattern
+		for event, err := range a.runner.Run(ctx, userID, sessionID, userContent, agent.RunConfig{}) {
 			if err != nil {
-				a.logger.Error("get_page_state/Screenshot", err)
-			} else {
-				output.Screenshot = base64.StdEncoding.EncodeToString(screenshotData)
+				return nil, fmt.Errorf("agent error at turn %d: %w", turnNum, err)
 			}
 
-			// Hide annotations after screenshot
-			if a.config.ShowAnnotations {
-				if err := a.browser.HideAnnotations(bgCtx); err != nil {
-					a.logger.Error("get_page_state/HideAnnotations", err)
+			if event == nil {
+				continue
+			}
+
+			// Check for function calls (tool usage)
+			if event.Content != nil {
+				for _, part := range event.Content.Parts {
+					// Check for function calls
+					if part.FunctionCall != nil {
+						toolCallNum++
+						toolName := part.FunctionCall.Name
+						toolArgs, _ := json.Marshal(part.FunctionCall.Args)
+						callStart := time.Now()
+
+						if a.debug {
+							fmt.Printf("[Step %d] Tool call: %s\n", toolCallNum, toolName)
+						}
+
+						lastActionName = toolName
+						lastActionSuccess = true // Will be updated by response
+
+						// Record the step
+						step := Step{
+							Number:     toolCallNum,
+							Action:     toolName,
+							Target:     string(toolArgs),
+							Timestamp:  callStart,
+							DurationMs: 0, // Will be updated
+							Success:    true,
+						}
+						a.steps = append(a.steps, step)
+
+						// Add to history
+						historyItem := HistoryItem{
+							StepNumber:    toolCallNum,
+							Timestamp:     callStart,
+							ActionName:    toolName,
+							ActionParams:  string(toolArgs),
+							ActionSuccess: true,
+							DurationMs:    0,
+						}
+						a.messageManager.AddHistoryItem(historyItem)
+
+						// Check if done tool was called
+						if toolName == "done" {
+							taskComplete = true
+							var doneArgs DoneArgs
+							if err := json.Unmarshal(toolArgs, &doneArgs); err == nil {
+								lastResult = &Result{
+									Success:  doneArgs.Success,
+									Data:     doneArgs.Data,
+									Steps:    a.steps,
+									Duration: time.Since(startTime),
+								}
+								if !doneArgs.Success {
+									lastResult.Error = doneArgs.Summary
+								}
+							}
+						}
+					}
+
+					// Check for function responses (tool results)
+					if part.FunctionResponse != nil {
+						if a.debug {
+							fmt.Printf("[Step %d] Tool response: %s\n", toolCallNum, part.FunctionResponse.Name)
+						}
+
+						// Extract result for history
+						resp := part.FunctionResponse.Response
+						if resp != nil {
+							resultBytes, _ := json.Marshal(resp)
+							lastActionResult = string(resultBytes)
+
+							// Check if action failed
+							if success, exists := resp["success"]; exists {
+								if successBool, ok := success.(bool); ok {
+									lastActionSuccess = successBool
+								}
+							}
+						}
+					}
+
+					// Check for text content (agent reasoning)
+					if part.Text != "" && a.debug {
+						// Only show first 200 chars of reasoning
+						text := part.Text
+						if len(text) > 200 {
+							text = text[:200] + "..."
+						}
+						fmt.Printf("[Turn %d] Agent: %s\n", turnNum, text)
+					}
 				}
 			}
+
+			// Check if this is the final response for this turn
+			if event.IsFinalResponse() {
+				break
+			}
 		}
 
-		return output, nil
-	}
-	pageStateTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "get_page_state",
-			Description: "Get the current page state including URL, title, and interactive elements. Call this to see what's on the page.",
-		},
-		getPageStateHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create page state tool: %w", err)
-	}
-	tools = append(tools, pageStateTool)
-
-	// Multi-tab tools
-	newTabHandler := func(ctx tool.Context, input NewTabInput) (NewTabOutput, error) {
-		if a.browser == nil {
-			return NewTabOutput{Success: false, Message: "Browser not initialized"}, nil
+		// If task is complete, break out of the loop
+		if taskComplete {
+			break
 		}
 
-		a.preAction()
-		defer a.postAction()
-
-		a.logger.Info("new_tab: Opening: %s", input.URL)
-
-		tabID, err := a.browser.NewTab(context.Background(), input.URL)
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return NewTabOutput{Success: false, Message: err.Error()}, nil
+		// Refresh page state for next iteration
+		if err := a.toolkit.RefreshElementMap(); err != nil {
+			if a.debug {
+				fmt.Printf("[Turn %d] Failed to refresh page state: %v\n", turnNum, err)
+			}
 		}
 
-		return NewTabOutput{
-			Success: true,
-			Message: fmt.Sprintf("Opened new tab: %s", tabID),
-			TabID:   tabID,
-			URL:     input.URL,
-		}, nil
+		// Build continuation message with history and updated page state
+		continuationMsg := a.messageManager.BuildContinuationMessage(
+			a.toolkit.GetElementMap(),
+			lastActionName,
+			lastActionResult,
+			lastActionSuccess,
+		)
+
+		// Filter sensitive data
+		continuationMsg = a.messageManager.FilterSensitiveData(continuationMsg)
+
+		userContent = genai.NewContentFromText(continuationMsg, "user")
 	}
-	newTabTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "new_tab",
-			Description: "Open a new browser tab with the specified URL. Returns the tab ID for later reference.",
-		},
-		newTabHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create new_tab tool: %w", err)
+
+	// Return result
+	if lastResult != nil {
+		return lastResult, nil
 	}
-	tools = append(tools, newTabTool)
 
-	switchTabHandler := func(ctx tool.Context, input SwitchTabInput) (SwitchTabOutput, error) {
-		if a.browser == nil {
-			return SwitchTabOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		a.preAction()
-		defer a.postAction()
-
-		a.logger.Info("switch_tab: Switching to: %s", input.TabID)
-
-		err := a.browser.SwitchTab(context.Background(), input.TabID)
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return SwitchTabOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		return SwitchTabOutput{
-			Success: true,
-			Message: fmt.Sprintf("Switched to tab: %s", input.TabID),
-			URL:     a.browser.GetURL(),
-			Title:   a.browser.GetTitle(),
-		}, nil
-	}
-	switchTabTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "switch_tab",
-			Description: "Switch to a different browser tab by its ID. Use list_tabs to see available tabs.",
-		},
-		switchTabHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create switch_tab tool: %w", err)
-	}
-	tools = append(tools, switchTabTool)
-
-	closeTabHandler := func(ctx tool.Context, input CloseTabInput) (CloseTabOutput, error) {
-		if a.browser == nil {
-			return CloseTabOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		a.logger.Info("close_tab: Closing: %s", input.TabID)
-
-		err := a.browser.CloseTab(context.Background(), input.TabID)
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return CloseTabOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		return CloseTabOutput{
-			Success: true,
-			Message: fmt.Sprintf("Closed tab: %s", input.TabID),
-		}, nil
-	}
-	closeTabTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "close_tab",
-			Description: "Close a browser tab by its ID.",
-		},
-		closeTabHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create close_tab tool: %w", err)
-	}
-	tools = append(tools, closeTabTool)
-
-	listTabsHandler := func(ctx tool.Context, input ListTabsInput) (ListTabsOutput, error) {
-		if a.browser == nil {
-			return ListTabsOutput{Success: false, Error: "Browser not initialized"}, nil
-		}
-
-		tabs := a.browser.ListTabs(context.Background())
-		activeTab := a.browser.GetActiveTabID()
-
-		var tabInfos []TabInfo
-		for _, tab := range tabs {
-			tabInfos = append(tabInfos, TabInfo{
-				TabID:  tab.ID,
-				URL:    tab.URL,
-				Title:  tab.Title,
-				Active: tab.ID == activeTab,
-			})
-		}
-
-		return ListTabsOutput{
-			Success:   true,
-			Tabs:      tabInfos,
-			ActiveTab: activeTab,
-		}, nil
-	}
-	listTabsTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "list_tabs",
-			Description: "List all open browser tabs with their IDs, URLs, and titles.",
-		},
-		listTabsHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create list_tabs tool: %w", err)
-	}
-	tools = append(tools, listTabsTool)
-
-	// Download file tool
-	downloadHandler := func(ctx tool.Context, input DownloadFileInput) (DownloadFileOutput, error) {
-		if a.browser == nil {
-			return DownloadFileOutput{Success: false, Message: "Browser not initialized"}, nil
-		}
-
-		a.logger.Info("download_file: Downloading from URL: %s (use_page_auth: %v)", input.URL, input.UsePageAuth)
-
-		cfg := browser.DefaultDownloadConfig()
-		// DefaultDownloadConfig already sets ~/.bua/downloads/
-
-		var downloadInfo *browser.DownloadInfo
-		var err error
-
-		if input.UsePageAuth {
-			// Use browser context with cookies/auth
-			downloadInfo, err = a.browser.DownloadResource(context.Background(), input.URL, cfg)
-		} else {
-			// Use direct HTTP download
-			downloadInfo, err = a.browser.DownloadFile(context.Background(), input.URL, cfg)
-		}
-
-		if err != nil {
-			a.logger.ActionResult(false, err.Error())
-			return DownloadFileOutput{Success: false, Message: err.Error()}, nil
-		}
-
-		msg := fmt.Sprintf("Downloaded: %s (%d bytes)", downloadInfo.Filename, downloadInfo.Size)
-		a.logger.ActionResult(true, msg)
-
-		return DownloadFileOutput{
-			Success:  true,
-			Message:  msg,
-			Filename: downloadInfo.Filename,
-			FilePath: downloadInfo.FilePath,
-			Size:     downloadInfo.Size,
-			MimeType: downloadInfo.MimeType,
-		}, nil
-	}
-	downloadTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "download_file",
-			Description: "Download a file from a URL. Use use_page_auth=true to use the browser's cookies and authentication context for authenticated downloads.",
-		},
-		downloadHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create download_file tool: %w", err)
-	}
-	tools = append(tools, downloadTool)
-
-	// Request human takeover tool
-	humanTakeoverHandler := func(ctx tool.Context, input HumanTakeoverInput) (HumanTakeoverOutput, error) {
-		a.logger.HumanTakeover(input.Reason)
-
-		return HumanTakeoverOutput{
-			Success:   true,
-			Message:   fmt.Sprintf("Human takeover requested: %s. Please complete the action and confirm.", input.Reason),
-			Completed: false,
-		}, nil
-	}
-	humanTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "request_human_takeover",
-			Description: "Request a human to take over for tasks like login, CAPTCHA, or other actions requiring human intervention.",
-		},
-		humanTakeoverHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create human takeover tool: %w", err)
-	}
-	tools = append(tools, humanTool)
-
-	// Done tool
-	doneHandler := func(ctx tool.Context, input DoneInput) (DoneOutput, error) {
-		a.logger.Done(input.Success, input.Summary)
-
-		return DoneOutput{
-			Success: input.Success,
-			Summary: input.Summary,
-			Data:    input.Data,
-		}, nil
-	}
-	doneTool, err := functiontool.New(
-		functiontool.Config{
-			Name:        "done",
-			Description: "Indicate that the task is complete. Set success=true if the task was accomplished, false otherwise.",
-		},
-		doneHandler,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create done tool: %w", err)
-	}
-	tools = append(tools, doneTool)
-
-	return tools, nil
+	// Max steps reached without completion
+	return &Result{
+		Success:  false,
+		Error:    fmt.Sprintf("Max steps (%d) reached without completion", a.maxSteps),
+		Steps:    a.steps,
+		Duration: time.Since(startTime),
+	}, nil
 }
 
-// Helper functions
-
-func sanitizeFilename(s string) string {
-	// Simple sanitization - replace non-alphanumeric with underscore
-	result := ""
-	for _, c := range s {
-		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') {
-			result += string(c)
-		} else if len(result) > 0 && result[len(result)-1] != '_' {
-			result += "_"
-		}
-	}
-	if len(result) > 50 {
-		result = result[:50]
-	}
-	return result
+// GetSteps returns all executed steps.
+func (a *BrowserAgent) GetSteps() []Step {
+	return a.steps
 }
 
-// Tool input/output types
-
-type ClickInput struct {
-	ElementIndex int     `json:"element_index,omitempty" jsonschema:"The index number of the element to click (shown in the element map). Use this OR coordinates, not both."`
-	X            float64 `json:"x,omitempty" jsonschema:"X coordinate for clicking at specific position (use when element detection fails)"`
-	Y            float64 `json:"y,omitempty" jsonschema:"Y coordinate for clicking at specific position (use when element detection fails)"`
-	Reasoning    string  `json:"reasoning" jsonschema:"Brief explanation of why you're clicking this element or position"`
+// GetHistory returns the agent's execution history.
+func (a *BrowserAgent) GetHistory() *AgentHistory {
+	return a.messageManager.GetHistory()
 }
 
-type ClickOutput struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
-}
-
-type TypeInput struct {
-	ElementIndex int    `json:"element_index" jsonschema:"The index number of the input element"`
-	Text         string `json:"text" jsonschema:"The text to type into the element"`
-	Reasoning    string `json:"reasoning" jsonschema:"Brief explanation of why you're typing this text"`
-}
-
-type TypeOutput struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
-}
-
-type ScrollInput struct {
-	Direction  string `json:"direction" jsonschema:"Direction to scroll: up or down (required)"`
-	Amount     int    `json:"amount" jsonschema:"Amount to scroll in pixels (default 500)"`
-	ElementID  int    `json:"element_id,omitempty" jsonschema:"Element ID of scrollable container (modal/popup/sidebar). If you know the container index, provide it here. If unsure, set auto_detect=true instead."`
-	AutoDetect bool   `json:"auto_detect,omitempty" jsonschema:"Set to true to auto-detect and scroll the most likely modal/scrollable container. Use this when you opened a modal but don't know which element is scrollable. Recommended after clicking buttons that open popups."`
-	Reasoning  string `json:"reasoning" jsonschema:"Why you are scrolling and whether you are scrolling page or a container"`
-}
-
-type ScrollOutput struct {
-	Success         bool   `json:"success"`
-	Message         string `json:"message"`
-	ElementScrolled int    `json:"element_scrolled,omitempty"` // Which element was scrolled (-1 or 0 = page, >0 = element index)
-	Screenshot      string `json:"screenshot,omitempty"`       // Base64 PNG (only in smart mode)
-}
-
-type NavigateInput struct {
-	URL       string `json:"url" jsonschema:"The URL to navigate to"`
-	Reasoning string `json:"reasoning" jsonschema:"Brief explanation of why you're navigating to this URL"`
-}
-
-type NavigateOutput struct {
-	Success    bool   `json:"success"`
-	Message    string `json:"message"`
-	URL        string `json:"url,omitempty"`
-	Title      string `json:"title,omitempty"`
-	Screenshot string `json:"screenshot,omitempty"` // Base64 PNG (only in smart mode)
-}
-
-type WaitInput struct {
-	Reason string `json:"reason" jsonschema:"What you're waiting for"`
-}
-
-type WaitOutput struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-}
-
-type GetPageStateInput struct {
-	// ExcludeScreenshot skips screenshot capture when true (optional, defaults to false).
-	ExcludeScreenshot *bool `json:"exclude_screenshot,omitempty"`
-}
-
-type GetPageStateOutput struct {
-	Success    bool   `json:"success"`
-	URL        string `json:"url"`
-	Title      string `json:"title"`
-	ElementMap string `json:"element_map"`
-	Screenshot string `json:"screenshot,omitempty"`
-	Error      string `json:"error,omitempty"`
-}
-
-// Multi-tab input/output types
-
-type NewTabInput struct {
-	URL string `json:"url" jsonschema:"The URL to open in the new tab"`
-}
-
-type NewTabOutput struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	TabID   string `json:"tab_id"`
-	URL     string `json:"url"`
-}
-
-type SwitchTabInput struct {
-	TabID string `json:"tab_id" jsonschema:"The ID of the tab to switch to"`
-}
-
-type SwitchTabOutput struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-	URL     string `json:"url"`
-	Title   string `json:"title"`
-}
-
-type CloseTabInput struct {
-	TabID string `json:"tab_id" jsonschema:"The ID of the tab to close"`
-}
-
-type CloseTabOutput struct {
-	Success bool   `json:"success"`
-	Message string `json:"message"`
-}
-
-type ListTabsInput struct{}
-
-type TabInfo struct {
-	TabID  string `json:"tab_id"`
-	URL    string `json:"url"`
-	Title  string `json:"title"`
-	Active bool   `json:"active"`
-}
-
-type ListTabsOutput struct {
-	Success   bool      `json:"success"`
-	Tabs      []TabInfo `json:"tabs"`
-	ActiveTab string    `json:"active_tab"`
-	Error     string    `json:"error,omitempty"`
-}
-
-type HumanTakeoverInput struct {
-	Reason string `json:"reason" jsonschema:"Why human intervention is needed"`
-}
-
-type HumanTakeoverOutput struct {
-	Success   bool   `json:"success"`
-	Message   string `json:"message"`
-	Completed bool   `json:"completed"`
-}
-
-type DoneInput struct {
-	Success bool           `json:"success" jsonschema:"Whether the task was completed successfully"`
-	Summary string         `json:"summary" jsonschema:"Summary of what was accomplished"`
-	Data    map[string]any `json:"data,omitempty" jsonschema:"Any data that was extracted during the task"`
-}
-
-type DoneOutput struct {
-	Success bool           `json:"success"`
-	Summary string         `json:"summary"`
-	Data    map[string]any `json:"data,omitempty"`
-}
-
-// Download tool input/output types
-
-type DownloadFileInput struct {
-	URL         string `json:"url" jsonschema:"The URL of the file to download"`
-	Filename    string `json:"filename,omitempty" jsonschema:"Optional: custom filename for the downloaded file"`
-	UsePageAuth bool   `json:"use_page_auth,omitempty" jsonschema:"If true, use the page's cookies and auth context for the download"`
-	Reasoning   string `json:"reasoning" jsonschema:"Brief explanation of why you're downloading this file"`
-}
-
-type DownloadFileOutput struct {
-	Success  bool   `json:"success"`
-	Message  string `json:"message"`
-	Filename string `json:"filename,omitempty"`
-	FilePath string `json:"file_path,omitempty"`
-	Size     int64  `json:"size,omitempty"`
-	MimeType string `json:"mime_type,omitempty"`
-}
-
-// GetADKAgent returns the underlying ADK agent for advanced use cases.
-func (a *BrowserAgent) GetADKAgent() agent.Agent {
-	return a.adkAgent
-}
-
-// GetBrowser returns the browser instance.
-func (a *BrowserAgent) GetBrowser() *browser.Browser {
-	return a.browser
-}
-
-// Tools returns the browser tools for use in other agents.
-func (a *BrowserAgent) Tools() []tool.Tool {
-	return a.tools
-}
-
-// GetLogger returns the logger for external token/timing updates.
-func (a *BrowserAgent) GetLogger() *Logger {
-	return a.logger
-}
-
-// GetTokenizer returns the tokenizer for accurate token counting.
-// May return nil if tokenizer initialization failed.
-func (a *BrowserAgent) GetTokenizer() *Tokenizer {
-	return a.tokenizer
-}
-
-// CountTokens returns the token count for text using the tokenizer.
-// Falls back to estimation if tokenizer is unavailable.
-func (a *BrowserAgent) CountTokens(ctx context.Context, text string) int {
-	if a.tokenizer != nil {
-		count, _ := a.tokenizer.CountTextTokens(ctx, text)
-		return count
-	}
-	// Fall back to estimation
-	return a.logger.tokens.EstimateTextTokens(text)
-}
-
-// Result represents the result of a task execution.
-type Result struct {
-	Success         bool
-	Data            map[string]any
-	Error           string
-	Steps           []Step
-	TokensUsed      int
-	ScreenshotPaths []string
-}
-
-// Step represents a single step in the execution.
-// Modeled after browser-use's AgentOutput for rich reasoning capture.
-type Step struct {
-	// Action is the action taken (e.g., "click", "type", "scroll").
-	Action string
-
-	// Target describes what element was targeted.
-	Target string
-
-	// Thinking captures the model's assessment of the current state before acting.
-	// This is extracted from the model's text output before the tool call.
-	Thinking string
-
-	// Evaluation captures how the model evaluated the previous action's result.
-	Evaluation string
-
-	// NextGoal describes what the model is trying to achieve with this action.
-	NextGoal string
-
-	// Reasoning is the brief explanation from the tool's reasoning parameter.
-	Reasoning string
-
-	// Memory captures any important context the agent wants to remember.
-	Memory string
-
-	// URL is the page URL at the time of this step.
-	URL string
-
-	// Title is the page title at the time of this step.
-	Title string
-
-	// ScreenshotPath is the path to the screenshot taken after this step.
-	ScreenshotPath string
-}
-
-// PageState represents the current state of the page.
-type PageState struct {
-	URL           string
-	Title         string
-	Elements      *dom.ElementMap
-	Screenshot    []byte
-	ScreenshotB64 string
+// Close cleans up the agent resources.
+func (a *BrowserAgent) Close() error {
+	// Clean up any resources if needed
+	return nil
 }
