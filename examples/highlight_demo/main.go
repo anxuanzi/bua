@@ -1,9 +1,9 @@
 // Package main demonstrates the action highlighting system in bua-go.
 // Run this example to see:
-// - Corner brackets around clicked elements
-// - "typing..." labels on input fields
+// - Direct element flashing with orange outline (browser-use style)
+// - Typing indicators on input fields
 // - Scroll direction indicators
-// - Crosshairs for coordinate-based clicks
+// - Pulsing circle animation for coordinate-based clicks
 package main
 
 import (
@@ -29,9 +29,9 @@ func main() {
 
 	// Create agent with visible browser and highlights
 	// The ShowHighlights option controls action indicators:
-	// - Corner brackets around elements being clicked
-	// - Crosshairs for coordinate-based clicks
-	// - "typing..." labels when entering text
+	// - Direct element flashing with orange outline (browser-use style)
+	// - Pulsing animation and crosshairs for coordinate clicks
+	// - Typing labels when entering text
 	// - Scroll direction indicators
 	showHighlights := true
 	agent, err := bua.New(bua.Config{
@@ -64,7 +64,7 @@ func main() {
 		log.Fatalf("Failed to navigate: %v", err)
 	}
 
-	result, err := agent.Run(ctx, `Search for "browser automation". Watch for orange corner brackets on the search box and submit button.`)
+	result, err := agent.Run(ctx, `Search for "browser automation". Watch for the orange flashing outline on the search box and submit button.`)
 	if err != nil {
 		log.Printf("Demo 1 failed: %v", err)
 	} else {
@@ -86,7 +86,7 @@ func main() {
 
 	// Demo 3: Multiple clicks
 	fmt.Println("\n=== Demo 3: Navigation (multiple click highlights) ===")
-	result, err = agent.Run(ctx, `Click on the first headline link to view the article. Watch the corner brackets highlight each element.`)
+	result, err = agent.Run(ctx, `Click on the first headline link to view the article. Watch the flashing outline highlight each element.`)
 	if err != nil {
 		log.Printf("Demo 3 failed: %v", err)
 	} else {
@@ -95,9 +95,10 @@ func main() {
 
 	fmt.Println("\n=== Highlight Demo Complete ===")
 	fmt.Println("You should have seen:")
-	fmt.Println("  - Orange corner brackets on clicked elements")
-	fmt.Println("  - 'typing...' labels on input fields")
+	fmt.Println("  - Orange flashing outline on clicked elements (browser-use style)")
+	fmt.Println("  - Action labels showing 'click [N]' or 'typing: ...'")
 	fmt.Println("  - Scroll direction indicators")
+	fmt.Println("  - Pulsing circles for coordinate-based clicks")
 	fmt.Println("\nHighlights are:")
 	fmt.Println("  - Enabled by default in non-headless mode")
 	fmt.Println("  - Configurable via ShowHighlights and HighlightDelay")

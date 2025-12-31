@@ -9,8 +9,8 @@ import (
 )
 
 // Highlighter provides visual feedback for browser automation actions.
-// It injects CSS and HTML elements to show animated highlights on elements
-// being interacted with, similar to Python browser-use.
+// Following Python browser-use's approach, it directly modifies element styles
+// for more reliable visual feedback that works regardless of page layout.
 type Highlighter struct {
 	page    *rod.Page
 	enabled bool
@@ -44,59 +44,95 @@ func (h *Highlighter) injectStyles() error {
 		const style = document.createElement('style');
 		style.id = 'bua-highlight-styles';
 		style.textContent = ` + "`" + `
-			.bua-highlight-corner {
-				position: fixed;
-				pointer-events: none;
-				z-index: 999999;
-				transition: all 0.15s ease-out;
+			/* Flash animation for direct element highlighting (browser-use style) */
+			@keyframes bua-flash {
+				0% { outline-color: #ff6b35; box-shadow: 0 0 0 4px rgba(255, 107, 53, 0.6); }
+				50% { outline-color: #ff8c5a; box-shadow: 0 0 0 8px rgba(255, 107, 53, 0.3); }
+				100% { outline-color: #ff6b35; box-shadow: 0 0 0 4px rgba(255, 107, 53, 0.6); }
 			}
-			.bua-highlight-corner-tl { border-top: 3px solid #ff6b35; border-left: 3px solid #ff6b35; }
-			.bua-highlight-corner-tr { border-top: 3px solid #ff6b35; border-right: 3px solid #ff6b35; }
-			.bua-highlight-corner-bl { border-bottom: 3px solid #ff6b35; border-left: 3px solid #ff6b35; }
-			.bua-highlight-corner-br { border-bottom: 3px solid #ff6b35; border-right: 3px solid #ff6b35; }
 
-			.bua-highlight-crosshair {
+			.bua-flash-highlight {
+				outline: 3px solid #ff6b35 !important;
+				outline-offset: 2px !important;
+				box-shadow: 0 0 0 4px rgba(255, 107, 53, 0.4) !important;
+				animation: bua-flash 0.3s ease-in-out 2 !important;
+				transition: none !important;
+			}
+
+			/* Coordinate-based click indicator */
+			.bua-click-indicator {
 				position: fixed;
 				pointer-events: none;
-				z-index: 999999;
+				z-index: 2147483647;
+				width: 20px;
+				height: 20px;
+				border: 3px solid #ff6b35;
+				border-radius: 50%;
+				transform: translate(-50%, -50%);
+				animation: bua-click-pulse 0.4s ease-out forwards;
 			}
-			.bua-highlight-crosshair-h {
-				width: 40px;
-				height: 2px;
+
+			@keyframes bua-click-pulse {
+				0% {
+					transform: translate(-50%, -50%) scale(0.5);
+					opacity: 1;
+					box-shadow: 0 0 0 0 rgba(255, 107, 53, 0.7);
+				}
+				100% {
+					transform: translate(-50%, -50%) scale(2);
+					opacity: 0;
+					box-shadow: 0 0 0 10px rgba(255, 107, 53, 0);
+				}
+			}
+
+			/* Crosshair for coordinate clicks */
+			.bua-crosshair {
+				position: fixed;
+				pointer-events: none;
+				z-index: 2147483647;
 				background: #ff6b35;
+			}
+			.bua-crosshair-h {
+				width: 30px;
+				height: 2px;
 				transform: translateX(-50%);
 			}
-			.bua-highlight-crosshair-v {
+			.bua-crosshair-v {
 				width: 2px;
-				height: 40px;
-				background: #ff6b35;
+				height: 30px;
 				transform: translateY(-50%);
 			}
-			.bua-highlight-circle {
-				position: fixed;
-				pointer-events: none;
-				z-index: 999998;
-				border: 2px solid #ff6b35;
-				border-radius: 50%;
-				animation: bua-pulse 0.4s ease-out;
-			}
-			@keyframes bua-pulse {
-				0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
-				100% { transform: translate(-50%, -50%) scale(1.5); opacity: 0; }
-			}
 
-			.bua-highlight-label {
+			/* Action label */
+			.bua-action-label {
 				position: fixed;
 				pointer-events: none;
-				z-index: 999999;
+				z-index: 2147483647;
 				background: #ff6b35;
 				color: white;
-				padding: 2px 6px;
-				font-size: 11px;
-				font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-				font-weight: 500;
-				border-radius: 3px;
+				padding: 4px 8px;
+				font-size: 12px;
+				font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+				font-weight: 600;
+				border-radius: 4px;
 				white-space: nowrap;
+				box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+			}
+
+			/* Scroll indicator */
+			.bua-scroll-indicator {
+				position: fixed;
+				pointer-events: none;
+				z-index: 2147483647;
+				background: rgba(255, 107, 53, 0.9);
+				color: white;
+				padding: 8px 16px;
+				font-size: 16px;
+				font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+				font-weight: 600;
+				border-radius: 8px;
+				transform: translate(-50%, -50%);
+				box-shadow: 0 4px 12px rgba(0,0,0,0.3);
 			}
 		` + "`" + `;
 		document.head.appendChild(style);
@@ -104,9 +140,9 @@ func (h *Highlighter) injectStyles() error {
 	return err
 }
 
-// HighlightElement shows animated corner brackets around an element.
-// x, y are the top-left corner; width, height are the element dimensions.
-func (h *Highlighter) HighlightElement(x, y, width, height float64, label string) error {
+// FlashElementBySelector flashes an element by CSS selector.
+// This is the browser-use style approach - direct element modification.
+func (h *Highlighter) FlashElementBySelector(selector, label string) error {
 	if !h.enabled || h.page == nil {
 		return nil
 	}
@@ -115,57 +151,153 @@ func (h *Highlighter) HighlightElement(x, y, width, height float64, label string
 		return err
 	}
 
-	cornerSize := 20.0 // Length of corner brackets
+	delayMs := h.delay.Milliseconds()
 
 	js := fmt.Sprintf(`(function() {
-		// Remove any existing highlights
-		document.querySelectorAll('.bua-highlight-corner, .bua-highlight-label').forEach(el => el.remove());
-
-		const x = %f;
-		const y = %f;
-		const w = %f;
-		const h = %f;
-		const cornerSize = %f;
+		const selector = %q;
 		const label = %q;
-		const padding = 4; // Padding around element
+		const delayMs = %d;
 
-		// Create corner elements
-		const corners = [
-			{cls: 'bua-highlight-corner-tl', left: x - padding, top: y - padding, w: cornerSize, h: cornerSize},
-			{cls: 'bua-highlight-corner-tr', left: x + w + padding - cornerSize, top: y - padding, w: cornerSize, h: cornerSize},
-			{cls: 'bua-highlight-corner-bl', left: x - padding, top: y + h + padding - cornerSize, w: cornerSize, h: cornerSize},
-			{cls: 'bua-highlight-corner-br', left: x + w + padding - cornerSize, top: y + h + padding - cornerSize, w: cornerSize, h: cornerSize},
-		];
+		// Find the element
+		const el = document.querySelector(selector);
+		if (!el) {
+			console.warn('bua-highlight: Element not found:', selector);
+			return false;
+		}
 
-		corners.forEach(c => {
-			const el = document.createElement('div');
-			el.className = 'bua-highlight-corner ' + c.cls;
-			el.style.left = c.left + 'px';
-			el.style.top = c.top + 'px';
-			el.style.width = c.w + 'px';
-			el.style.height = c.h + 'px';
-			document.body.appendChild(el);
+		// Remove any existing highlights
+		document.querySelectorAll('.bua-action-label').forEach(e => e.remove());
+		document.querySelectorAll('.bua-flash-highlight').forEach(e => {
+			e.classList.remove('bua-flash-highlight');
 		});
 
-		// Add label if provided
+		// Add flash class to element
+		el.classList.add('bua-flash-highlight');
+
+		// Add label near the element
 		if (label) {
+			const rect = el.getBoundingClientRect();
 			const labelEl = document.createElement('div');
-			labelEl.className = 'bua-highlight-label';
+			labelEl.className = 'bua-action-label';
 			labelEl.textContent = label;
-			labelEl.style.left = (x - padding) + 'px';
-			labelEl.style.top = (y - padding - 22) + 'px';
+			labelEl.style.left = rect.left + 'px';
+			labelEl.style.top = Math.max(0, rect.top - 28) + 'px';
 			document.body.appendChild(labelEl);
 		}
-	})()`, x, y, width, height, cornerSize, label)
+
+		return true;
+	})()`, selector, label, delayMs)
+
+	result, err := h.page.Eval(js)
+	if err != nil {
+		return fmt.Errorf("failed to flash element: %w", err)
+	}
+
+	// Check if element was found
+	if result.Value.Bool() {
+		time.Sleep(h.delay)
+	}
+
+	return nil
+}
+
+// FlashElementAtPoint flashes the element at specific viewport coordinates.
+// Uses document.elementFromPoint to find and highlight the actual element.
+func (h *Highlighter) FlashElementAtPoint(x, y float64, label string) error {
+	if !h.enabled || h.page == nil {
+		return nil
+	}
+
+	if err := h.injectStyles(); err != nil {
+		return err
+	}
+
+	js := fmt.Sprintf(`(function() {
+		const x = %f;
+		const y = %f;
+		const label = %q;
+
+		// Remove any existing highlights
+		document.querySelectorAll('.bua-action-label, .bua-click-indicator, .bua-crosshair').forEach(e => e.remove());
+		document.querySelectorAll('.bua-flash-highlight').forEach(e => {
+			e.classList.remove('bua-flash-highlight');
+		});
+
+		// Find element at point
+		const el = document.elementFromPoint(x, y);
+
+		if (el && el !== document.body && el !== document.documentElement) {
+			// Flash the actual element
+			el.classList.add('bua-flash-highlight');
+
+			// Add label
+			if (label) {
+				const rect = el.getBoundingClientRect();
+				const labelEl = document.createElement('div');
+				labelEl.className = 'bua-action-label';
+				labelEl.textContent = label;
+				labelEl.style.left = rect.left + 'px';
+				labelEl.style.top = Math.max(0, rect.top - 28) + 'px';
+				document.body.appendChild(labelEl);
+			}
+			return true;
+		}
+
+		// Fallback: show click indicator at coordinates
+		const indicator = document.createElement('div');
+		indicator.className = 'bua-click-indicator';
+		indicator.style.left = x + 'px';
+		indicator.style.top = y + 'px';
+		document.body.appendChild(indicator);
+
+		// Add crosshairs
+		const hLine = document.createElement('div');
+		hLine.className = 'bua-crosshair bua-crosshair-h';
+		hLine.style.left = x + 'px';
+		hLine.style.top = y + 'px';
+		document.body.appendChild(hLine);
+
+		const vLine = document.createElement('div');
+		vLine.className = 'bua-crosshair bua-crosshair-v';
+		vLine.style.left = x + 'px';
+		vLine.style.top = y + 'px';
+		document.body.appendChild(vLine);
+
+		// Add label
+		if (label) {
+			const labelEl = document.createElement('div');
+			labelEl.className = 'bua-action-label';
+			labelEl.textContent = label;
+			labelEl.style.left = (x + 15) + 'px';
+			labelEl.style.top = Math.max(0, y - 28) + 'px';
+			document.body.appendChild(labelEl);
+		}
+
+		return true;
+	})()`, x, y, label)
 
 	_, err := h.page.Eval(js)
 	if err != nil {
-		return fmt.Errorf("failed to show element highlight: %w", err)
+		return fmt.Errorf("failed to flash element at point: %w", err)
 	}
 
-	// Wait for visual feedback
 	time.Sleep(h.delay)
 	return nil
+}
+
+// HighlightElement shows animated highlight on an element using direct styling.
+// x, y are viewport coordinates of the top-left corner.
+// This method finds the element at the center point and flashes it directly.
+func (h *Highlighter) HighlightElement(x, y, width, height float64, label string) error {
+	if !h.enabled || h.page == nil {
+		return nil
+	}
+
+	// Calculate center point and use FlashElementAtPoint for better reliability
+	centerX := x + width/2
+	centerY := y + height/2
+
+	return h.FlashElementAtPoint(centerX, centerY, label)
 }
 
 // HighlightCoordinates shows a crosshair and expanding circle at the click position.
@@ -174,60 +306,7 @@ func (h *Highlighter) HighlightCoordinates(x, y float64, label string) error {
 		return nil
 	}
 
-	if err := h.injectStyles(); err != nil {
-		return err
-	}
-
-	js := fmt.Sprintf(`(function() {
-		// Remove any existing highlights
-		document.querySelectorAll('.bua-highlight-crosshair, .bua-highlight-crosshair-h, .bua-highlight-crosshair-v, .bua-highlight-circle, .bua-highlight-label').forEach(el => el.remove());
-
-		const x = %f;
-		const y = %f;
-		const label = %q;
-
-		// Horizontal crosshair
-		const hLine = document.createElement('div');
-		hLine.className = 'bua-highlight-crosshair bua-highlight-crosshair-h';
-		hLine.style.left = x + 'px';
-		hLine.style.top = y + 'px';
-		document.body.appendChild(hLine);
-
-		// Vertical crosshair
-		const vLine = document.createElement('div');
-		vLine.className = 'bua-highlight-crosshair bua-highlight-crosshair-v';
-		vLine.style.left = x + 'px';
-		vLine.style.top = y + 'px';
-		document.body.appendChild(vLine);
-
-		// Expanding circle
-		const circle = document.createElement('div');
-		circle.className = 'bua-highlight-circle';
-		circle.style.left = x + 'px';
-		circle.style.top = y + 'px';
-		circle.style.width = '30px';
-		circle.style.height = '30px';
-		document.body.appendChild(circle);
-
-		// Add label if provided
-		if (label) {
-			const labelEl = document.createElement('div');
-			labelEl.className = 'bua-highlight-label';
-			labelEl.textContent = label;
-			labelEl.style.left = (x + 15) + 'px';
-			labelEl.style.top = (y - 25) + 'px';
-			document.body.appendChild(labelEl);
-		}
-	})()`, x, y, label)
-
-	_, err := h.page.Eval(js)
-	if err != nil {
-		return fmt.Errorf("failed to show coordinate highlight: %w", err)
-	}
-
-	// Wait for visual feedback
-	time.Sleep(h.delay)
-	return nil
+	return h.FlashElementAtPoint(x, y, label)
 }
 
 // HighlightScroll shows a scroll indicator on the page or element.
@@ -241,31 +320,37 @@ func (h *Highlighter) HighlightScroll(x, y float64, direction string) error {
 	}
 
 	arrow := "↓"
+	text := "Scrolling down"
 	switch direction {
 	case "up":
 		arrow = "↑"
+		text = "Scrolling up"
 	case "left":
 		arrow = "←"
+		text = "Scrolling left"
 	case "right":
 		arrow = "→"
+		text = "Scrolling right"
 	}
 
 	js := fmt.Sprintf(`(function() {
-		// Remove any existing scroll indicators
-		document.querySelectorAll('.bua-highlight-label').forEach(el => el.remove());
+		// Remove any existing indicators
+		document.querySelectorAll('.bua-scroll-indicator').forEach(e => e.remove());
 
 		const x = %f;
 		const y = %f;
 		const arrow = %q;
+		const text = %q;
 
-		const labelEl = document.createElement('div');
-		labelEl.className = 'bua-highlight-label';
-		labelEl.textContent = 'Scroll ' + arrow;
-		labelEl.style.left = x + 'px';
-		labelEl.style.top = y + 'px';
-		labelEl.style.fontSize = '14px';
-		document.body.appendChild(labelEl);
-	})()`, x, y, arrow)
+		const indicator = document.createElement('div');
+		indicator.className = 'bua-scroll-indicator';
+		indicator.textContent = arrow + ' ' + text;
+		indicator.style.left = x + 'px';
+		indicator.style.top = y + 'px';
+		document.body.appendChild(indicator);
+
+		return true;
+	})()`, x, y, arrow, text)
 
 	_, err := h.page.Eval(js)
 	if err != nil {
@@ -283,12 +368,12 @@ func (h *Highlighter) HighlightType(x, y, width, height float64, text string) er
 		return nil
 	}
 
-	// Show corner brackets with "typing..." label
-	label := "typing..."
+	// Create label with typing indicator
+	label := "⌨️ typing..."
 	if len(text) > 20 {
-		label = fmt.Sprintf("typing: %s...", text[:20])
+		label = fmt.Sprintf("⌨️ %s...", text[:20])
 	} else if len(text) > 0 {
-		label = fmt.Sprintf("typing: %s", text)
+		label = fmt.Sprintf("⌨️ %s", text)
 	}
 
 	return h.HighlightElement(x, y, width, height, label)
@@ -301,7 +386,13 @@ func (h *Highlighter) RemoveHighlights() error {
 	}
 
 	_, err := h.page.Eval(`(function() {
-		document.querySelectorAll('.bua-highlight-corner, .bua-highlight-crosshair, .bua-highlight-crosshair-h, .bua-highlight-crosshair-v, .bua-highlight-circle, .bua-highlight-label').forEach(el => el.remove());
+		// Remove all highlight overlays
+		document.querySelectorAll('.bua-action-label, .bua-click-indicator, .bua-crosshair, .bua-scroll-indicator').forEach(el => el.remove());
+
+		// Remove flash class from all elements
+		document.querySelectorAll('.bua-flash-highlight').forEach(el => {
+			el.classList.remove('bua-flash-highlight');
+		});
 	})()`)
 	return err
 }
