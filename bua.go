@@ -189,56 +189,6 @@ var (
 	MobileViewport = &Viewport{Width: 375, Height: 812}
 )
 
-// TokenPreset defines token management settings for different use cases.
-//
-// Deprecated: Use the Preset field in Config instead.
-// Migration: TokenPresetTextOnly -> Preset: PresetFast
-//
-//	TokenPresetEfficient -> Preset: PresetEfficient
-//	TokenPresetBalanced -> Preset: PresetBalanced (or just omit, it's the default)
-//	TokenPresetQuality -> Preset: PresetQuality
-//	TokenPresetMaximum -> Preset: PresetMax
-type TokenPreset struct {
-	MaxElements        int
-	ScreenshotMaxWidth int
-	ScreenshotQuality  int
-	TextOnly           bool
-}
-
-// Deprecated: Use Preset field in Config instead of these variables.
-// These are kept for backward compatibility only.
-var (
-	// Deprecated: Use Preset: PresetEfficient instead.
-	TokenPresetEfficient = &TokenPreset{MaxElements: 100, ScreenshotMaxWidth: 640, ScreenshotQuality: 50}
-	// Deprecated: Use Preset: PresetBalanced instead (or just omit, it's the default).
-	TokenPresetBalanced = &TokenPreset{MaxElements: 150, ScreenshotMaxWidth: 800, ScreenshotQuality: 60}
-	// Deprecated: Use Preset: PresetQuality instead.
-	TokenPresetQuality = &TokenPreset{MaxElements: 250, ScreenshotMaxWidth: 1024, ScreenshotQuality: 75}
-	// Deprecated: Use Preset: PresetMax instead.
-	TokenPresetMaximum = &TokenPreset{MaxElements: 400, ScreenshotMaxWidth: 1280, ScreenshotQuality: 85}
-	// Deprecated: Use Preset: PresetFast instead.
-	TokenPresetTextOnly = &TokenPreset{MaxElements: 200, TextOnly: true}
-)
-
-// ApplyTokenPreset applies a token preset to the config.
-//
-// Deprecated: Use the Preset field in Config instead.
-//
-//	// Old way:
-//	cfg.ApplyTokenPreset(bua.TokenPresetTextOnly)
-//
-//	// New way (simpler):
-//	cfg := bua.Config{APIKey: key, Preset: bua.PresetFast}
-func (c *Config) ApplyTokenPreset(preset *TokenPreset) {
-	if preset == nil {
-		return
-	}
-	c.MaxElements = preset.MaxElements
-	c.ScreenshotMaxWidth = preset.ScreenshotMaxWidth
-	c.ScreenshotQuality = preset.ScreenshotQuality
-	c.TextOnly = preset.TextOnly
-}
-
 // Gemini model constants for convenience.
 const (
 	// ModelGemini3Pro is the latest Gemini 3 Pro model (1M context).

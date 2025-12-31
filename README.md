@@ -23,9 +23,10 @@ The AI sees the page (screenshots + DOM), decides what to click/type/scroll, and
 | **Natural Language**         | Describe tasks in plain English                    |
 | **Vision + DOM**             | AI sees both screenshots and page structure        |
 | **Google ADK**               | Powered by Gemini via Agent Development Kit        |
-| **Token Presets**            | Optimize for speed, cost, or quality               |
+| **Presets**                  | Optimize for speed, cost, or quality               |
 | **TextOnly Mode**            | Skip screenshots for fastest operation             |
 | **Enhanced DOM**             | CDP-based extraction with paint order filtering    |
+| **Action Highlighting**      | Orange visual feedback showing clicks/typing       |
 | **Session Memory**           | Remembers cookies, logins, and patterns            |
 | **Headless Mode**            | Run invisibly in the background                    |
 | **Viewport Presets**         | Desktop, tablet, and mobile sizes                  |
@@ -169,29 +170,6 @@ All Gemini 2.x/3.x models have 1M token context window.
 | `bua.ModelGemini25FlashLite` | gemini-2.5-flash-lite | Most cost-effective |
 | `bua.ModelGemini20Flash` | gemini-2.0-flash | Previous gen, stable |
 
-### Token Management
-
-> **Note:** The `Preset` field (see [Presets](#presets) above) is the recommended way to control token usage.
-> The `TokenPreset` variables and `ApplyTokenPreset()` method still work but are deprecated.
-
-**Migration from old API:**
-
-```go
-// Old way (deprecated)
-cfg.ApplyTokenPreset(bua.TokenPresetTextOnly)
-
-// New way (simpler)
-cfg := bua.Config{APIKey: apiKey, Preset: bua.PresetFast}
-```
-
-| Old (Deprecated) | New (Recommended) |
-|------------------|-------------------|
-| `TokenPresetTextOnly` | `PresetFast` |
-| `TokenPresetEfficient` | `PresetEfficient` |
-| `TokenPresetBalanced` | `PresetBalanced` (default) |
-| `TokenPresetQuality` | `PresetQuality` |
-| `TokenPresetMaximum` | `PresetMax` |
-
 ### Advanced: Manual Token Configuration
 
 > **Note:** Most users should use `Preset` instead. These fields are for advanced use cases only.
@@ -309,6 +287,25 @@ cfg := bua.Config{
 ```
 
 Screenshots are saved to `~/.bua/screenshots/steps/` with annotations showing element indices.
+
+### Action Highlighting
+
+When running with `Headless: false`, you'll see visual feedback for each action:
+
+- **Orange outlines** around clicked elements
+- **"typing..."** labels on text inputs
+- **Scroll indicators** showing direction
+- **Crosshairs** for coordinate-based clicks
+
+Configure highlighting:
+
+```go
+cfg := bua.Config{
+    Headless:       false,                  // Required to see highlights
+    ShowHighlights: &showHighlights,        // Explicit on/off (defaults to !Headless)
+    HighlightDelay: 500 * time.Millisecond, // How long highlights show
+}
+```
 
 ## Dual-Use Architecture
 
@@ -428,6 +425,30 @@ agent.Close()
 ```bash
 go test ./...        # Run tests
 go test -v ./...     # Verbose output
+```
+
+## Examples
+
+The `examples/` directory contains working demonstrations:
+
+| Example | Description |
+|---------|-------------|
+| `01_quick_start` | Minimal setup, Google search and click |
+| `02_google_search` | Search with preset configuration |
+| `03_data_scraping` | Scrape Hacker News headlines |
+| `04_file_download` | Download files with auth support |
+| `05_multi_page` | Navigate across multiple sites |
+| `06_modal_handling` | Scroll within modals and popups |
+| `07_adk_embedding` | Use as a tool in other ADK agents |
+| `08_deep_research` | Multi-site research with data extraction |
+| `09_instagram_research` | Multi-tab content analysis |
+| `10_highlight_demo` | Visual action highlighting |
+
+Run any example:
+
+```bash
+cd examples/01_quick_start
+go run main.go
 ```
 
 ## Contributing

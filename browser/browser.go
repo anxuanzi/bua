@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/jpeg"
 	"image/png"
+	"log"
 	"sync"
 	"time"
 
@@ -80,6 +81,9 @@ func New(rodBrowser *rod.Browser, cfg Config) *Browser {
 
 // SetHighlightEnabled enables or disables action highlighting.
 func (b *Browser) SetHighlightEnabled(enabled bool) {
+	if HighlightDebug {
+		log.Printf("[highlight] SetHighlightEnabled called: enabled=%v", enabled)
+	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.highlightEnabled = enabled
@@ -102,9 +106,15 @@ func (b *Browser) SetHighlightDelay(d time.Duration) {
 func (b *Browser) getHighlighter() *Highlighter {
 	page := b.getActivePageLocked()
 	if page == nil {
+		if HighlightDebug {
+			log.Printf("[highlight] getHighlighter: page is nil, returning nil")
+		}
 		return nil
 	}
 	if b.highlighter == nil || b.highlighter.page != page {
+		if HighlightDebug {
+			log.Printf("[highlight] getHighlighter: creating new highlighter, enabled=%v", b.highlightEnabled)
+		}
 		b.highlighter = NewHighlighter(page, b.highlightEnabled)
 		b.highlighter.SetDelay(b.highlightDelay)
 	}
@@ -403,6 +413,10 @@ func (b *Browser) Click(ctx context.Context, elementIndex int) error {
 	// Show highlight before click
 	if highlighter := b.getHighlighter(); highlighter != nil {
 		label := fmt.Sprintf("click [%d]", elementIndex)
+		if HighlightDebug {
+			log.Printf("[highlight] Click: about to highlight element at (%.0f, %.0f, %.0f, %.0f) with label %q",
+				el.BoundingBox.X, el.BoundingBox.Y, el.BoundingBox.Width, el.BoundingBox.Height, label)
+		}
 		_ = highlighter.HighlightElement(
 			el.BoundingBox.X,
 			el.BoundingBox.Y,
@@ -411,6 +425,8 @@ func (b *Browser) Click(ctx context.Context, elementIndex int) error {
 			label,
 		)
 		defer highlighter.RemoveHighlights()
+	} else if HighlightDebug {
+		log.Printf("[highlight] Click: getHighlighter returned nil")
 	}
 
 	// Click at the center of the element using JavaScript
