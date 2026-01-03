@@ -68,12 +68,13 @@ func (a *Agent) Start(ctx context.Context) error {
 
 	// Create browser agent
 	agentCfg := agent.AgentConfig{
-		APIKey:   a.config.APIKey,
-		Model:    a.config.Model,
-		MaxSteps: a.config.MaxSteps,
-		TextOnly: a.config.TextOnly,
-		MaxWidth: a.config.ScreenshotMaxWidth,
-		Debug:    a.config.Debug,
+		APIKey:        a.config.APIKey,
+		Model:         a.config.Model,
+		MaxSteps:      a.config.MaxSteps,
+		TextOnly:      a.config.TextOnly,
+		MaxWidth:      a.config.ScreenshotMaxWidth,
+		Debug:         a.config.Debug,
+		ScreenshotDir: a.config.ScreenshotDir,
 	}
 
 	browserAgent, err := agent.NewBrowserAgent(ctx, agentCfg, b)
@@ -106,24 +107,26 @@ func (a *Agent) Run(ctx context.Context, task string) (*Result, error) {
 
 	// Convert agent result to public Result type
 	result := &Result{
-		Success:    agentResult.Success,
-		Data:       agentResult.Data,
-		Error:      agentResult.Error,
-		Duration:   agentResult.Duration,
-		TokensUsed: agentResult.TokensUsed,
-		Steps:      make([]Step, len(agentResult.Steps)),
+		Success:         agentResult.Success,
+		Data:            agentResult.Data,
+		Error:           agentResult.Error,
+		Duration:        agentResult.Duration,
+		TokensUsed:      agentResult.TokensUsed,
+		Steps:           make([]Step, len(agentResult.Steps)),
+		ScreenshotPaths: agentResult.ScreenshotPaths,
 	}
 
 	for i, s := range agentResult.Steps {
 		result.Steps[i] = Step{
-			Number:     s.Number,
-			Action:     s.Action,
-			Target:     s.Target,
-			Thinking:   s.Thinking,
-			Evaluation: s.Evaluation,
-			NextGoal:   s.NextGoal,
-			Memory:     s.Memory,
-			Duration:   time.Duration(s.DurationMs) * time.Millisecond,
+			Number:         s.Number,
+			Action:         s.Action,
+			Target:         s.Target,
+			Thinking:       s.Thinking,
+			Evaluation:     s.Evaluation,
+			NextGoal:       s.NextGoal,
+			Memory:         s.Memory,
+			Duration:       time.Duration(s.DurationMs) * time.Millisecond,
+			ScreenshotPath: s.ScreenshotPath,
 		}
 	}
 

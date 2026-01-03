@@ -19,11 +19,12 @@ func main() {
 
 	// Create agent configuration
 	cfg := bua.Config{
-		APIKey:   apiKey,
-		Model:    "gemini-3-flash-preview", // Fast model for quick tasks
-		Headless: false,                    // Show browser window
-		Preset:   bua.PresetBalanced,       // Good balance of quality and cost
-		Debug:    true,                     // Enable debug logging
+		APIKey:        apiKey,
+		Model:         "gemini-3-flash-preview", // Fast model for quick tasks
+		Headless:      false,                    // Show browser window
+		Preset:        bua.PresetBalanced,       // Good balance of quality and cost
+		Debug:         true,                     // Enable debug logging
+		ScreenshotDir: "./screenshots",
 	}
 
 	// Create the agent

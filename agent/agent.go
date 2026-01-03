@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/anxuanzi/bua/browser"
@@ -18,31 +19,36 @@ import (
 
 // BrowserAgent is the main agent that controls browser automation via LLM using ADK.
 type BrowserAgent struct {
-	agent          agent.Agent
-	runner         *runner.Runner
-	sessionService session.Service
-	browser        *browser.Browser
-	toolkit        *BrowserToolkit
-	messageManager *MessageManager
-	maxSteps       int
-	maxFailures    int
-	debug          bool
-	steps          []Step
+	agent           agent.Agent
+	runner          *runner.Runner
+	sessionService  session.Service
+	browser         *browser.Browser
+	toolkit         *BrowserToolkit
+	messageManager  *MessageManager
+	maxSteps        int
+	maxFailures     int
+	debug           bool
+	steps           []Step
+	screenshotDir   string
+	screenshotPaths []string
+	useVision       bool
+	maxWidth        int
 }
 
 // Step represents a single step in the agent's execution.
 type Step struct {
-	Number     int       `json:"number"`
-	Action     string    `json:"action"`
-	Target     string    `json:"target,omitempty"`
-	Thinking   string    `json:"thinking,omitempty"`
-	Evaluation string    `json:"evaluation,omitempty"`
-	Memory     string    `json:"memory,omitempty"`
-	NextGoal   string    `json:"next_goal,omitempty"`
-	Result     string    `json:"result,omitempty"`
-	Success    bool      `json:"success"`
-	Timestamp  time.Time `json:"timestamp"`
-	DurationMs int64     `json:"duration_ms"`
+	Number         int       `json:"number"`
+	Action         string    `json:"action"`
+	Target         string    `json:"target,omitempty"`
+	Thinking       string    `json:"thinking,omitempty"`
+	Evaluation     string    `json:"evaluation,omitempty"`
+	Memory         string    `json:"memory,omitempty"`
+	NextGoal       string    `json:"next_goal,omitempty"`
+	Result         string    `json:"result,omitempty"`
+	Success        bool      `json:"success"`
+	Timestamp      time.Time `json:"timestamp"`
+	DurationMs     int64     `json:"duration_ms"`
+	ScreenshotPath string    `json:"screenshot_path,omitempty"`
 }
 
 // AgentConfig configures the browser agent.
@@ -56,16 +62,18 @@ type AgentConfig struct {
 	TextOnly        bool
 	MaxWidth        int
 	Debug           bool
+	ScreenshotDir   string // Directory to save screenshots (empty = no saving)
 }
 
 // Result represents the outcome of an agent run.
 type Result struct {
-	Success    bool          `json:"success"`
-	Data       any           `json:"data,omitempty"`
-	Error      string        `json:"error,omitempty"`
-	Steps      []Step        `json:"steps"`
-	Duration   time.Duration `json:"duration"`
-	TokensUsed int           `json:"tokens_used,omitempty"`
+	Success         bool          `json:"success"`
+	Data            any           `json:"data,omitempty"`
+	Error           string        `json:"error,omitempty"`
+	Steps           []Step        `json:"steps"`
+	Duration        time.Duration `json:"duration"`
+	TokensUsed      int           `json:"tokens_used,omitempty"`
+	ScreenshotPaths []string      `json:"screenshot_paths,omitempty"`
 }
 
 // NewBrowserAgent creates a new browser agent using ADK.
@@ -165,17 +173,29 @@ func NewBrowserAgent(ctx context.Context, cfg AgentConfig, b *browser.Browser) (
 		return nil, fmt.Errorf("failed to create runner: %w", err)
 	}
 
+	// Create screenshot directory if specified
+	screenshotDir := cfg.ScreenshotDir
+	if screenshotDir != "" {
+		if err := os.MkdirAll(screenshotDir, 0755); err != nil {
+			return nil, fmt.Errorf("failed to create screenshot directory: %w", err)
+		}
+	}
+
 	return &BrowserAgent{
-		agent:          llmAgent,
-		runner:         agentRunner,
-		sessionService: sessionService,
-		browser:        b,
-		toolkit:        toolkit,
-		messageManager: messageManager,
-		maxSteps:       maxSteps,
-		maxFailures:    maxFailures,
-		debug:          cfg.Debug,
-		steps:          make([]Step, 0),
+		agent:           llmAgent,
+		runner:          agentRunner,
+		sessionService:  sessionService,
+		browser:         b,
+		toolkit:         toolkit,
+		messageManager:  messageManager,
+		maxSteps:        maxSteps,
+		maxFailures:     maxFailures,
+		debug:           cfg.Debug,
+		steps:           make([]Step, 0),
+		screenshotDir:   screenshotDir,
+		screenshotPaths: make([]string, 0),
+		useVision:       !cfg.TextOnly,
+		maxWidth:        maxWidth,
 	}, nil
 }
 
@@ -183,6 +203,7 @@ func NewBrowserAgent(ctx context.Context, cfg AgentConfig, b *browser.Browser) (
 func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 	startTime := time.Now()
 	a.steps = make([]Step, 0)
+	a.screenshotPaths = make([]string, 0)
 	a.messageManager.Clear()
 	a.messageManager.SetTask(task)
 
@@ -214,8 +235,18 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 	// Filter sensitive data
 	taskMessage = a.messageManager.FilterSensitiveData(taskMessage)
 
-	// Create user message content
-	userContent := genai.NewContentFromText(taskMessage, "user")
+	// Create user message content (with optional screenshot)
+	var userContent *genai.Content
+	if a.useVision {
+		screenshotData, _, err := a.captureAndSaveScreenshot(ctx, 0)
+		if err == nil && len(screenshotData) > 0 {
+			userContent = a.createMultimodalContent(taskMessage, screenshotData)
+		} else {
+			userContent = genai.NewContentFromText(taskMessage, "user")
+		}
+	} else {
+		userContent = genai.NewContentFromText(taskMessage, "user")
+	}
 
 	// Run the agent using ADK runner
 	turnNum := 0
@@ -225,6 +256,7 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 	var lastActionName string
 	var lastActionResult string
 	var lastActionSuccess bool
+	var lastScreenshotData []byte // Reuse screenshot for continuation message
 
 	for toolCallNum < a.maxSteps && !taskComplete {
 		turnNum++
@@ -239,11 +271,23 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 				fmt.Printf("[Turn %d] Too many consecutive failures (%d), forcing completion\n", turnNum, a.maxFailures)
 			}
 			return &Result{
-				Success:  false,
-				Error:    fmt.Sprintf("Task aborted after %d consecutive failures", a.maxFailures),
-				Steps:    a.steps,
-				Duration: time.Since(startTime),
+				Success:         false,
+				Error:           fmt.Sprintf("Task aborted after %d consecutive failures", a.maxFailures),
+				Steps:           a.steps,
+				Duration:        time.Since(startTime),
+				ScreenshotPaths: a.screenshotPaths,
 			}, nil
+		}
+
+		// Capture screenshot at START of each turn (before action execution)
+		// This follows browser-use pattern: model sees current state before deciding
+		// The screenshot path is saved with the Step to record what the model saw
+		var turnScreenshotPath string
+		if a.useVision {
+			_, path, err := a.captureAndSaveScreenshot(ctx, turnNum)
+			if err == nil {
+				turnScreenshotPath = path
+			}
 		}
 
 		// Run the agent for one turn using iter.Seq2 pattern
@@ -273,14 +317,15 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 						lastActionName = toolName
 						lastActionSuccess = true // Will be updated by response
 
-						// Record the step
+						// Record the step with the screenshot taken at start of this turn
 						step := Step{
-							Number:     toolCallNum,
-							Action:     toolName,
-							Target:     string(toolArgs),
-							Timestamp:  callStart,
-							DurationMs: 0, // Will be updated
-							Success:    true,
+							Number:         toolCallNum,
+							Action:         toolName,
+							Target:         string(toolArgs),
+							Timestamp:      callStart,
+							DurationMs:     0, // Will be updated
+							Success:        true,
+							ScreenshotPath: turnScreenshotPath,
 						}
 						a.steps = append(a.steps, step)
 
@@ -301,10 +346,11 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 							var doneArgs DoneArgs
 							if err := json.Unmarshal(toolArgs, &doneArgs); err == nil {
 								lastResult = &Result{
-									Success:  doneArgs.Success,
-									Data:     doneArgs.Data,
-									Steps:    a.steps,
-									Duration: time.Since(startTime),
+									Success:         doneArgs.Success,
+									Data:            doneArgs.Data,
+									Steps:           a.steps,
+									Duration:        time.Since(startTime),
+									ScreenshotPaths: a.screenshotPaths,
 								}
 								if !doneArgs.Success {
 									lastResult.Error = doneArgs.Summary
@@ -330,6 +376,17 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 								if successBool, ok := success.(bool); ok {
 									lastActionSuccess = successBool
 								}
+							}
+						}
+
+						// Capture screenshot after tool execution for continuation message
+						// Note: We DON'T update the step's ScreenshotPath - that was already set
+						// to the pre-action screenshot (browser-use pattern: screenshot shows what
+						// the model saw BEFORE deciding, not the result after)
+						if a.useVision {
+							data, _, err := a.captureAndSaveScreenshot(ctx, toolCallNum)
+							if err == nil {
+								lastScreenshotData = data // Store for continuation message
 							}
 						}
 					}
@@ -375,7 +432,13 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 		// Filter sensitive data
 		continuationMsg = a.messageManager.FilterSensitiveData(continuationMsg)
 
-		userContent = genai.NewContentFromText(continuationMsg, "user")
+		// Create content with optional screenshot (reuse the last captured screenshot)
+		if a.useVision && len(lastScreenshotData) > 0 {
+			userContent = a.createMultimodalContent(continuationMsg, lastScreenshotData)
+			lastScreenshotData = nil // Clear after use
+		} else {
+			userContent = genai.NewContentFromText(continuationMsg, "user")
+		}
 	}
 
 	// Return result
@@ -385,10 +448,11 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 
 	// Max steps reached without completion
 	return &Result{
-		Success:  false,
-		Error:    fmt.Sprintf("Max steps (%d) reached without completion", a.maxSteps),
-		Steps:    a.steps,
-		Duration: time.Since(startTime),
+		Success:         false,
+		Error:           fmt.Sprintf("Max steps (%d) reached without completion", a.maxSteps),
+		Steps:           a.steps,
+		Duration:        time.Since(startTime),
+		ScreenshotPaths: a.screenshotPaths,
 	}, nil
 }
 
@@ -406,4 +470,47 @@ func (a *BrowserAgent) GetHistory() *AgentHistory {
 func (a *BrowserAgent) Close() error {
 	// Clean up any resources if needed
 	return nil
+}
+
+// captureAndSaveScreenshot captures a screenshot and saves it to disk if configured.
+// Returns the screenshot bytes and the saved path (empty if not saved).
+func (a *BrowserAgent) captureAndSaveScreenshot(ctx context.Context, stepNum int) ([]byte, string, error) {
+	// Capture screenshot
+	data, err := a.browser.Screenshot(ctx, false)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to capture screenshot: %w", err)
+	}
+
+	// Save to disk if directory is configured
+	var savedPath string
+	if a.screenshotDir != "" {
+		filename := fmt.Sprintf("step_%03d_%d.jpg", stepNum, time.Now().UnixMilli())
+		savedPath = filepath.Join(a.screenshotDir, filename)
+		if err := os.WriteFile(savedPath, data, 0644); err != nil {
+			return data, "", fmt.Errorf("failed to save screenshot: %w", err)
+		}
+		a.screenshotPaths = append(a.screenshotPaths, savedPath)
+	}
+
+	return data, savedPath, nil
+}
+
+// GetScreenshotPaths returns all screenshot paths from this run.
+func (a *BrowserAgent) GetScreenshotPaths() []string {
+	return a.screenshotPaths
+}
+
+// createMultimodalContent creates a genai.Content with both text and image.
+func (a *BrowserAgent) createMultimodalContent(text string, imageData []byte) *genai.Content {
+	parts := []*genai.Part{
+		{Text: text},
+		{InlineData: &genai.Blob{
+			Data:     imageData,
+			MIMEType: "image/jpeg",
+		}},
+	}
+	return &genai.Content{
+		Parts: parts,
+		Role:  "user",
+	}
 }

@@ -7,6 +7,7 @@ require (
 	github.com/nfnt/resize v0.0.0-20180221191011-83c6a9932646
 	google.golang.org/adk v0.3.0
 	google.golang.org/genai v1.40.0
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 require (
