@@ -10,6 +10,7 @@ import (
 	"github.com/go-rod/rod/lib/proto"
 
 	"github.com/anxuanzi/bua/dom"
+	screenshotpkg "github.com/anxuanzi/bua/screenshot"
 )
 
 // Navigate navigates the current page to a URL.
@@ -554,26 +555,60 @@ func (b *Browser) Focus(ctx context.Context, elementIndex int, elementMap *dom.E
 }
 
 // Screenshot takes a screenshot of the current page.
+// Uses the enhanced screenshot package with proper page readiness checks.
 func (b *Browser) Screenshot(ctx context.Context, fullPage bool) ([]byte, error) {
 	page := b.ActivePage()
 	if page == nil {
 		return nil, fmt.Errorf("no active page")
 	}
 
-	var data []byte
-	var err error
+	// Use the screenshot package with LLM-optimized options
+	opts := screenshotpkg.LLMOptions()
+	opts.FullPage = fullPage
 
-	if fullPage {
-		data, err = page.Screenshot(true, nil)
-	} else {
-		data, err = page.Screenshot(false, nil)
+	return screenshotpkg.Capture(ctx, page, opts)
+}
+
+// ScreenshotSafe takes a screenshot, returning nil (not error) for blank pages.
+// This is useful for agent loops where blank screenshots should be skipped.
+func (b *Browser) ScreenshotSafe(ctx context.Context, fullPage bool) ([]byte, error) {
+	page := b.ActivePage()
+	if page == nil {
+		return nil, nil // No page, return nil safely
 	}
 
-	if err != nil {
-		return nil, fmt.Errorf("screenshot failed: %w", err)
+	return screenshotpkg.ForLLMSafe(ctx, page, b.config.ViewportWidth)
+}
+
+// ScreenshotAfterAction captures a screenshot after an action completes.
+// Waits for page stability before capturing.
+func (b *Browser) ScreenshotAfterAction(ctx context.Context) ([]byte, error) {
+	page := b.ActivePage()
+	if page == nil {
+		return nil, fmt.Errorf("no active page")
 	}
 
-	return data, nil
+	return screenshotpkg.CaptureAfterAction(ctx, page, b.config.ViewportWidth)
+}
+
+// IsPageReady checks if the current page is ready for screenshot capture.
+func (b *Browser) IsPageReady() bool {
+	page := b.ActivePage()
+	if page == nil {
+		return false
+	}
+
+	return screenshotpkg.IsPageReady(page)
+}
+
+// WaitForPageReady waits until the page is ready, with timeout.
+func (b *Browser) WaitForPageReady(ctx context.Context, timeout time.Duration) error {
+	page := b.ActivePage()
+	if page == nil {
+		return fmt.Errorf("no active page")
+	}
+
+	return screenshotpkg.WaitUntilReady(ctx, page, timeout)
 }
 
 // ExtractContent extracts text content from the page.

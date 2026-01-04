@@ -380,12 +380,11 @@ func (a *BrowserAgent) Run(ctx context.Context, task string) (*Result, error) {
 						}
 
 						// Capture screenshot after tool execution for continuation message
-						// Note: We DON'T update the step's ScreenshotPath - that was already set
-						// to the pre-action screenshot (browser-use pattern: screenshot shows what
-						// the model saw BEFORE deciding, not the result after)
+						// Uses captureScreenshotAfterAction which waits for page stability
+						// This ensures the screenshot shows the result of the action
 						if a.useVision {
-							data, _, err := a.captureAndSaveScreenshot(ctx, toolCallNum)
-							if err == nil {
+							data, _, err := a.captureScreenshotAfterAction(ctx, toolCallNum)
+							if err == nil && len(data) > 0 {
 								lastScreenshotData = data // Store for continuation message
 							}
 						}
@@ -474,11 +473,21 @@ func (a *BrowserAgent) Close() error {
 
 // captureAndSaveScreenshot captures a screenshot and saves it to disk if configured.
 // Returns the screenshot bytes and the saved path (empty if not saved).
+// Uses ScreenshotSafe which gracefully handles blank pages by returning nil.
 func (a *BrowserAgent) captureAndSaveScreenshot(ctx context.Context, stepNum int) ([]byte, string, error) {
-	// Capture screenshot
-	data, err := a.browser.Screenshot(ctx, false)
+	// Use ScreenshotSafe which handles blank pages gracefully
+	// This returns nil data (not error) if page is blank or content is empty
+	data, err := a.browser.ScreenshotSafe(ctx, false)
 	if err != nil {
 		return nil, "", fmt.Errorf("failed to capture screenshot: %w", err)
+	}
+
+	// If no screenshot data (blank page), return empty without error
+	if len(data) == 0 {
+		if a.debug {
+			fmt.Printf("[Screenshot] Step %d: Skipped (page is blank or empty)\n", stepNum)
+		}
+		return nil, "", nil
 	}
 
 	// Save to disk if directory is configured
@@ -490,6 +499,45 @@ func (a *BrowserAgent) captureAndSaveScreenshot(ctx context.Context, stepNum int
 			return data, "", fmt.Errorf("failed to save screenshot: %w", err)
 		}
 		a.screenshotPaths = append(a.screenshotPaths, savedPath)
+
+		if a.debug {
+			fmt.Printf("[Screenshot] Step %d: Saved to %s\n", stepNum, savedPath)
+		}
+	}
+
+	return data, savedPath, nil
+}
+
+// captureScreenshotAfterAction captures a screenshot after an action has completed.
+// Uses enhanced waiting for page stability after the action.
+func (a *BrowserAgent) captureScreenshotAfterAction(ctx context.Context, stepNum int) ([]byte, string, error) {
+	// Use ScreenshotAfterAction which waits for page stability
+	data, err := a.browser.ScreenshotAfterAction(ctx)
+	if err != nil {
+		// Non-fatal for blank page errors
+		if a.debug {
+			fmt.Printf("[Screenshot] Step %d: After-action capture failed: %v\n", stepNum, err)
+		}
+		return nil, "", nil
+	}
+
+	if len(data) == 0 {
+		return nil, "", nil
+	}
+
+	// Save to disk if directory is configured
+	var savedPath string
+	if a.screenshotDir != "" {
+		filename := fmt.Sprintf("step_%03d_after_%d.jpg", stepNum, time.Now().UnixMilli())
+		savedPath = filepath.Join(a.screenshotDir, filename)
+		if err := os.WriteFile(savedPath, data, 0644); err != nil {
+			return data, "", fmt.Errorf("failed to save screenshot: %w", err)
+		}
+		a.screenshotPaths = append(a.screenshotPaths, savedPath)
+
+		if a.debug {
+			fmt.Printf("[Screenshot] Step %d: After-action saved to %s\n", stepNum, savedPath)
+		}
 	}
 
 	return data, savedPath, nil
