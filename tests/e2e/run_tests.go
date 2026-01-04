@@ -222,13 +222,14 @@ func runSingleTest(test TestCase, cfg Config) TestResult {
 
 	// Create agent
 	agentCfg := bua.Config{
-		APIKey:   cfg.APIKey,
-		Model:    cfg.Model,
-		Headless: cfg.Headless,
-		Debug:    cfg.Debug,
-		Preset:   bua.PresetBalanced,
-		MaxSteps: 50, // Reasonable limit for tests
-
+		APIKey:          cfg.APIKey,
+		Model:           cfg.Model,
+		Headless:        cfg.Headless,
+		Debug:           cfg.Debug,
+		Preset:          bua.PresetBalanced,
+		MaxSteps:        50, // Reasonable limit for tests
+		ShowAnnotations: true,
+		ShowHighlight:   true,
 	}
 
 	agent, err := bua.New(agentCfg)
