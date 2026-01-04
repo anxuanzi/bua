@@ -143,7 +143,7 @@ func parseFlags() Config {
 	}
 
 	if cfg.Model == "" {
-		cfg.Model = "gemini-2.5-flash"
+		cfg.Model = "gemini-3-flash-preview"
 	}
 
 	return cfg
